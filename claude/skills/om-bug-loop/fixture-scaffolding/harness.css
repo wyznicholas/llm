@@ -1,0 +1,5 @@
+@import "../src/styles.css";
+/* vite's root is this fixture dir, so Tailwind v4's automatic source
+   detection would only scan fixture-T18/. Point it at the real component
+   tree or every utility class in FriendsPane.tsx goes ungenerated. */
+@source "../src";
