@@ -413,7 +413,8 @@ opens its own PR: it writes its PR section to a file and runs `train.ts ship
 ships with `--verified`. Its turn ends when its commits are on the open batch PR.
 Name `references/trains.md` in every `om-task` and `om-feature` prompt, and pass
 the surface key when the card note carries a `surface:` line — an old prompt
-that says "open the MR" will get a `gh pr create` and a fifty-sixth open PR.
+that says "open the MR" can get a direct `gh pr create` / `glab mr create`
+instead of the GitHub or GitLab surface train.
 
 **Tell it never to park.** An agent that spawns a *background* reviewer and then
 ends its turn has stopped mid-arc: the harness reports it "finished" while

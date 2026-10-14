@@ -1,0 +1,321 @@
+#!/bin/bash
+# End-of-day work update for OM Chat #announcements, run headless by launchd
+# on nicholass-Mac-mini at 19:30 Mon-Sat.
+#
+# @openmarket asked the team (om://msg/2bff5aaac0d6/16) to "post a 2 line
+# update at the end of each day so i am in the loop, and who is taking on what
+# task". This collects what Nicholas actually did since the last successful
+# post, has Claude write the update, and posts it as him into the "Daily Update"
+# topic (om://topic/3d48bb78) of #announcements.
+#
+# Usage: om-daily-update [--dry-run] [--force]
+#   --dry-run  build the draft, print it, post nothing, do not move the cursor
+#   --force    rebuild today's draft even if one already exists
+#
+# Design notes, each forced by something measured on this host:
+#
+#  1. POSTS AS NICHOLAS, NOT AS AN AGENT. `om room say` uses the stored device
+#     credential, so the message carries his own handle — which is what the
+#     channel asked for; every teammate posts under their own name. The MCP
+#     agent badge is a different, revocable identity and is deliberately not
+#     used here.
+#
+#  2. Claude evidence comes from the TRANSCRIPTS under ~/.claude/projects, not
+#     from ~/.claude/history.jsonl. history.jsonl records only prompts typed in
+#     the interactive CLI; on this host it had not been written since 2026-08-24
+#     because desktop-app and programmatic sessions never reach it. Trusting it
+#     would silently report a working day as idle.
+#
+#  3. The cursor advances ONLY after a successful post. A failed run therefore
+#     re-covers its own window tomorrow rather than dropping a day of work on
+#     the floor, and a Monday run picks up Saturday automatically.
+#
+#  4. Everything is read-only except the post itself. No repo is touched, no
+#     branch is checked out — several of these worktrees belong to other live
+#     sessions and switching a branch under them would corrupt their work.
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+ROOM="2bff5aaac0d6"                       # #announcements, openmarket space
+# The "Daily Update" topic inside that channel. Topic ids are registry-backed:
+# they survive a rename and a merge, so this literal keeps resolving even if the
+# topic is renamed or folded into another one.
+TOPIC="3d48bb78"
+BASE="$HOME/.claude/daily-updates"
+LOGS="$BASE/logs"
+REPOS="$HOME/Documents/GitlabRepos"
+CLAUDE_PROJECTS="$HOME/.claude/projects"
+CODEX_SESSIONS="$HOME/.codex/sessions"
+CURSOR_FILE="$BASE/.cursor"
+PAUSE_FILE="$BASE/.paused"
+MANIFEST="$BASE/latest-manifest.txt"
+# Commits land under his work identity; the gmail and bonzonic addresses are
+# the same person on personal-account repos and would otherwise be missed.
+AUTHORS='nicholaswong@trontalgroup\.com|wongyiznicholas@gmail\.com|bonzonic'
+# The relay chunks messages at 2000 bytes and a split post loses its formatting
+# (a table or a bolded lead line broken across two messages renders as raw
+# text), so an over-long draft is refused rather than posted in pieces.
+MAX_BYTES=1900
+
+mkdir -p "$LOGS"
+TODAY=$(date +%Y-%m-%d)
+DRAFT="$BASE/$TODAY.md"
+ERRLOG="$LOGS/$TODAY.err"
+
+DRY=0; FORCE=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    --force)   FORCE=1 ;;
+    *) echo "unknown flag: $a" >&2; exit 2 ;;
+  esac
+done
+# A dry run must not leave today's draft file behind: the "already posted" guard
+# below keys on that file, so a dry run at 3pm used to silently cancel the 19:30
+# post.
+(( DRY )) && DRAFT="$BASE/$TODAY.dry.md"
+
+# Evidence that lives under ~/Documents (git repos, kanban cards) is read by a
+# Homebrew-python helper, because launchd's TCC grant is per binary and bash and
+# a bash-spawned git are denied. See the header of om-daily-update-evidence.
+EVIDENCE="$HOME/.local/bin/om-daily-update-evidence"
+
+# gh/glab failed on 2026-09-16 with a DNS timeout at 19:30 and the draft then
+# reported his shipped work as unverified. A network blip should cost a retry,
+# not a wrong update.
+retry() {
+  local i
+  for i in 1 2 3; do
+    "$@" && return 0
+    (( i < 3 )) && sleep 20
+  done
+  return 1
+}
+
+# Kill switch: `touch ~/.claude/daily-updates/.paused` stops the routine without
+# unloading launchd. Exits 0 so launchd does not treat it as a crash loop.
+if [[ -e "$PAUSE_FILE" && $DRY -eq 0 ]]; then
+  echo "paused ($PAUSE_FILE exists) — skipping $TODAY"
+  exit 0
+fi
+
+# Already posted today and not forced: nothing to do. Guards against launchd
+# firing twice after a wake.
+if [[ -f "$DRAFT" && $FORCE -eq 0 && $DRY -eq 0 ]]; then
+  echo "already posted for $TODAY (use --force to redo)"
+  exit 0
+fi
+
+# ------------------------------------------------------------------- window
+NOW_MS=$(( $(date +%s) * 1000 ))
+CURSOR_MS=0
+[[ -r "$CURSOR_FILE" ]] && CURSOR_MS=$(tr -dc '0-9' < "$CURSOR_FILE" || :)
+[[ -n "$CURSOR_MS" ]] || CURSOR_MS=0
+if (( CURSOR_MS == 0 )); then
+  # First run has no cursor. 24h keeps report #1 the same size as every later
+  # one instead of dumping the whole of history into the channel.
+  CURSOR_MS=$(( NOW_MS - 86400000 ))
+  WINDOW_NOTE="first run — no cursor, looked back 24h"
+else
+  WINDOW_NOTE="since last successful post"
+fi
+WINDOW_HOURS=$(( (NOW_MS - CURSOR_MS) / 3600000 ))
+# find(1) takes whole minutes and rounds toward zero; +1 stops the sweep from
+# cutting off files written during the current partial minute.
+WINDOW_MINS=$(( (NOW_MS - CURSOR_MS) / 60000 + 1 ))
+CURSOR_ISO_UTC=$(date -u -r $(( CURSOR_MS / 1000 )) '+%Y-%m-%dT%H:%M:%SZ')
+CURSOR_ISO=$(date -r $(( CURSOR_MS / 1000 )) '+%Y-%m-%d %H:%M %Z')
+SINCE_GIT=$(date -r $(( CURSOR_MS / 1000 )) '+%Y-%m-%dT%H:%M:%S')
+# `gh search prs --updated` takes a bare date, not a timestamp.
+CURSOR_DATE=$(date -r $(( CURSOR_MS / 1000 )) '+%Y-%m-%d')
+
+# ---------------------------------------------------------------- manifest
+{
+  echo "Nicholas Wong — work in this window"
+  echo "Window: $CURSOR_ISO -> now (${WINDOW_HOURS}h, $WINDOW_NOTE)"
+  echo "Generated: $(date '+%Y-%m-%d %H:%M %Z') on $(hostname -s)"
+  echo ""
+
+  # -------------------------------------------------------- merge requests
+  # scope=created_by_me is org-wide in one call, so no per-repo loop and no
+  # dependence on which directory this runs from.
+  echo "## GitLab merge requests updated in window (authored by him)"
+  retry glab api "/merge_requests?scope=created_by_me&state=all&updated_after=$CURSOR_ISO_UTC&per_page=100" 2>>"$ERRLOG" \
+    | jq -r '.[] | "— \(.references.full)  [\(.state)]  \(.title)\n   updated \(.updated_at[0:16])  merged=\(.merged_at // "no")  draft=\(.draft)  url=\(.web_url)"' 2>/dev/null \
+    || echo "(glab unavailable — see $ERRLOG)"
+  echo ""
+
+  # Open MRs regardless of window: this is the raw material for the "what he
+  # picks up next" half of the update, which the window alone cannot supply.
+  echo "## His merge requests still OPEN (any age — this is what he is carrying)"
+  retry glab api "/merge_requests?scope=created_by_me&state=opened&per_page=100" 2>>"$ERRLOG" \
+    | jq -r '.[] | "— \(.references.full)  \(.title)\n   opened \(.created_at[0:10])  draft=\(.draft)  upvotes=\(.upvotes)  all_discussions_resolved=\(.blocking_discussions_resolved)  (true means NOTHING is blocking)"' 2>/dev/null \
+    || echo "(glab unavailable)"
+  echo ""
+
+  # ------------------------------------------------------- github pull reqs
+  # Not every repo is on GitLab: openmarket-chat and its siblings live on
+  # github.com/openmarket-xyz. Without this section their commits show up with
+  # no PR behind them, and merged work reads as unshipped.
+  echo "## GitHub pull requests updated in window (authored by him)"
+  retry gh search prs --author=@me --updated=">=${CURSOR_DATE}" --limit 60 \
+      --json number,title,state,repository,updatedAt,url 2>>"$ERRLOG" \
+    | jq -r '.[] | "— \(.repository.nameWithOwner)#\(.number)  [\(.state)]  \(.title)\n   updated \(.updatedAt[0:16])  url=\(.url)"' 2>/dev/null \
+    || echo "(gh unavailable — see $ERRLOG)"
+  echo ""
+
+  echo "## His GitHub pull requests still OPEN (any age — also what he is carrying)"
+  retry gh search prs --author=@me --state=open --limit 60 \
+      --json number,title,repository,createdAt,isDraft,url 2>>"$ERRLOG" \
+    | jq -r '.[] | "— \(.repository.nameWithOwner)#\(.number)  \(.title)\n   opened \(.createdAt[0:10])  draft=\(.isDraft)"' 2>/dev/null \
+    || echo "(gh unavailable)"
+  echo ""
+
+  # ----------------------------------------------------------------- cards
+  # The om-bug-loop board is where the day's product work is described in
+  # words: what a user hit, how bad, and which PR carries the fix. Without it
+  # the writer only saw worktree names like "openmarket-chat-T189" and could
+  # say nothing about what a fix is FOR.
+  echo "## Bug-loop cards that moved in window (card's own problem statement; PR state is live)"
+  "$EVIDENCE" cards "$CURSOR_MS" 2>>"$ERRLOG" || echo "(card evidence unavailable — see $ERRLOG)"
+  echo ""
+
+  echo "## Open cards next in the queue (highest priority first)"
+  "$EVIDENCE" queue 2>>"$ERRLOG" || echo "(queue unavailable)"
+  echo ""
+
+  # --------------------------------------------------------------- commits
+  # --author pins this to his own work (without it the whole team's commits
+  # read as his); the helper also sweeps wt/ worktrees and collapses squashes.
+  echo "## Commits HE authored in window (deduped across all worktrees)"
+  "$EVIDENCE" commits "$SINCE_GIT" "$AUTHORS" 2>>"$ERRLOG" || echo "(commit evidence unavailable — see $ERRLOG)"
+  echo ""
+
+  # ------------------------------------------------------------ claude code
+  echo "## Claude Code sessions in window (transcripts are the source of truth)"
+  ALL_CLAUDE=$(find "$CLAUDE_PROJECTS" -name '*.jsonl' -mmin "-$WINDOW_MINS" -size +4k 2>/dev/null || :)
+  # Subagent and workflow transcripts are machine-authored: their "user" turns
+  # are prompts Claude wrote for itself. Quoting them would report things
+  # Nicholas never asked for as if he had. Counted, never quoted.
+  # Scheduled routines (midnight-scout, this very script) run as "user" turns
+  # too; their prompts are not requests he made, and quoting them is how a
+  # bot's internal question about a stray daemon became a line in the update.
+  MACHINE_RE='/wf_[^/]*/|/agent-[^/]*\.jsonl$|/journal\.jsonl$|/-Users-nicholas--local-share-midnight-scout-workspace/|/-Users-nicholas--claude-daily-updates/'
+  CLAUDE_FILES=$(printf '%s\n' "$ALL_CLAUDE" | grep -vE "$MACHINE_RE" | head -40 || :)
+  SUB_N=$(printf '%s\n' "$ALL_CLAUDE" | grep -cE "$MACHINE_RE" || :)
+  echo "his own sessions: $(printf '%s\n' "$CLAUDE_FILES" | grep -c . || :)   subagent/workflow/scheduled-routine (excluded): $SUB_N"
+  echo ""
+  if [[ -n "$CLAUDE_FILES" ]]; then
+    printf '%s\n' "$CLAUDE_FILES" | while read -r f; do
+      [[ -n "$f" ]] || continue
+      printf '— %s | %s\n' \
+        "$(stat -f '%Sm' -t '%m-%d %H:%M' "$f")" \
+        "$(basename "$(dirname "$f")" | sed 's|^-Users-nicholas-||')"
+      # Newlines collapse to a marker so one pasted diff stays one line.
+      # Skills, system reminders and slash-command bodies arrive as user-role
+      # text turns; they are harness noise, not requests he made.
+      # A long-lived session is "in window" if it was touched at all, so turns
+      # are filtered by their own timestamp — otherwise yesterday's messages are
+      # re-reported (the 09-16 leftover-daemon line came back on 09-17).
+      jq -r --arg since "$CURSOR_ISO_UTC" 'select(.type=="user" and (.timestamp // "") >= $since)
+             | .message.content
+             | if type=="string" then . elif type=="array" then (map(select(.type=="text")|.text)|join(" ")) else empty end
+             | gsub("\n";" / ")' "$f" 2>/dev/null \
+        | grep -v '^[[:space:]]*$' \
+        | grep -vE '^[[:space:]]*(<(system-reminder|command-name|command-message|command-args|local-command)|#[[:space:]])' \
+        | head -6 | cut -c1-220 | sed 's/^/     · /' || :
+    done
+  fi
+  echo ""
+
+  # ----------------------------------------------------------------- codex
+  echo "## Codex sessions in window (what he handed to Codex)"
+  CODEX_FILES=$(find "$CODEX_SESSIONS" -name 'rollout-*.jsonl' -mmin "-$WINDOW_MINS" 2>/dev/null | sort | head -30 || :)
+  echo "rollouts in window: $(printf '%s\n' "$CODEX_FILES" | grep -c . || :)"
+  if [[ -n "$CODEX_FILES" ]]; then
+    printf '%s\n' "$CODEX_FILES" | while read -r f; do
+      [[ -n "$f" ]] || continue
+      jq -rs '(map(select(.type=="session_meta"))|first|.payload) as $m
+              | "— " + (($m.cwd // "?") | sub("^/Users/[^/]+/";"~/")) + "  " + ($m.timestamp // "?")[0:16]' "$f" 2>/dev/null || :
+      # Codex injects harness blocks as user-role messages; filtered out so they
+      # do not read as instructions he gave.
+      jq -r 'select(.payload.type=="user_message")
+             | ((.payload.message // "") | gsub("\n";" / ") | .[0:220])' "$f" 2>/dev/null \
+        | grep -vE '^ *<(recommended_plugins|user_instructions|environment_context)' \
+        | head -4 | sed 's/^/     · /' || :
+    done
+  fi
+} > "$MANIFEST" 2>>"$ERRLOG"
+
+# An empty window means he did not work, not that the collector broke. Posting
+# a hollow "nothing to report" every quiet evening would train the channel to
+# ignore the update, so stay silent instead.
+if ! grep -qE '^— ' "$MANIFEST"; then
+  echo "no evidence of work in window ($WINDOW_HOURS h) — not posting"
+  exit 0
+fi
+
+# -------------------------------------------------------------- write draft
+cd "$BASE"
+# The manifest goes into the prompt verbatim rather than being read by a tool.
+# Passing it as a file meant the run depended on a Read tool call succeeding,
+# and when that did not happen the model produced an empty draft with no error.
+# Inlining removes the tool surface entirely — this call needs no tools at all.
+write_draft() {  # $1 = extra instruction appended after the manifest
+  claude -p "$(cat "$BASE/PROMPT.md")
+
+=== BEGIN MANIFEST ===
+$(cat "$MANIFEST")
+=== END MANIFEST ===
+$1" \
+      --model claude-opus-5 \
+      > "$DRAFT.tmp" 2>>"$ERRLOG" </dev/null || { rm -f "$DRAFT.tmp"; return 1; }
+  # Strip a code fence if the model wrapped the body in one despite the prompt,
+  # and trim leading/trailing blank lines. Posting a stray ``` would be visible.
+  sed -e '/^```/d' "$DRAFT.tmp" | awk 'NF {p=1} p' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "$DRAFT"
+  rm -f "$DRAFT.tmp"
+  BYTES=$(wc -c < "$DRAFT" | tr -d ' ')
+}
+
+if ! write_draft ""; then
+  echo "claude failed to write the update — see $ERRLOG" >&2
+  exit 1
+fi
+# Explaining what a fix is for takes more words than listing refs, so an
+# over-long first draft is expected occasionally. One rewrite, then give up.
+if (( BYTES > MAX_BYTES )); then
+  echo "first draft ${BYTES}B is over ${MAX_BYTES}B — asking for a shorter one" >&2
+  write_draft "Your previous draft was ${BYTES} bytes; the hard limit is ${MAX_BYTES}. Rewrite it under 1600 bytes: merge themes, drop the least important item, keep the plain-language impact." \
+    || { echo "claude failed on the rewrite — see $ERRLOG" >&2; exit 1; }
+fi
+
+# A refused draft is renamed so it can be read, but it no longer counts as
+# "already posted today" — a re-run after fixing the cause needs no --force.
+if (( BYTES > MAX_BYTES )); then
+  mv "$DRAFT" "$DRAFT.rejected"
+  echo "draft is ${BYTES}B, over the ${MAX_BYTES}B relay limit — not posting. See $DRAFT.rejected" >&2
+  exit 1
+fi
+if (( BYTES < 40 )); then
+  mv "$DRAFT" "$DRAFT.rejected"
+  echo "draft is only ${BYTES}B — too short to be a real update, not posting. See $DRAFT.rejected" >&2
+  exit 1
+fi
+
+if (( DRY )); then
+  echo "--- DRY RUN: would post to #announcements > Daily Update ($ROOM/$TOPIC), ${BYTES}B ---"
+  cat "$DRAFT"
+  echo "--- end (cursor NOT advanced) ---"
+  exit 0
+fi
+
+# --------------------------------------------------------------------- post
+if om room say "$ROOM" --topic "$TOPIC" "$(cat "$DRAFT")" >>"$LOGS/$TODAY.out" 2>>"$ERRLOG"; then
+  echo "$NOW_MS" > "$CURSOR_FILE"
+  echo "posted $TODAY to #announcements > Daily Update (${BYTES}B)"
+else
+  # Keep the draft: the disk copy is the source of truth and he can post it by
+  # hand. The cursor stays put so tomorrow's run re-covers today.
+  echo "post failed — draft kept at $DRAFT, cursor not advanced. See $ERRLOG" >&2
+  exit 1
+fi

@@ -54,9 +54,9 @@ group, record that PID, and stop only that group. `pnpm` is a wrapper, so the
 listener on the port is a child — check it belongs to your group before signalling
 (this shape verified 2026-09-15 on macOS with a throwaway wrapper+listener pair):
 
-    bash -c 'set -m; cd "$1" && VITE_PORT=$2 pnpm dev > "$3/vite-$2.log" 2>&1 & echo $! > "$3/vite-$2.pid"' _ "$WORKTREE" 8061 "$S"
+    bash -c 'set -m; cd "$1" && VITE_PORT=$2 pnpm dev > "$3/vite-$2.log" 2>&1 & echo $! > "$3/vite-T<NN>-$2.pid"' _ "$WORKTREE" 8061 "$S"
 
-    PORT=8061; PID=$(cat "$S/vite-$PORT.pid"); LIS=$(lsof -ti tcp:$PORT -sTCP:LISTEN)
+    PORT=8061; PID=$(cat "$S/vite-T<NN>-$PORT.pid"); LIS=$(lsof -ti tcp:$PORT -sTCP:LISTEN)
     [ "$(ps -o pgid= -p "$PID" | tr -d ' ')" = "$PID" ] && [ "$(ps -o pgid= -p "$LIS" | tr -d ' ')" = "$PID" ] \
       && kill -TERM -- "-$PID" || echo "refusing: $PORT's listener is not in the group I started"
 

@@ -1,0 +1,14 @@
+# Same shape as midnight-scout: one fresh `claude -p` session per feature so a
+# night never becomes one quadratic 8-hour conversation, and `!digest` runs even
+# after a failed or budget-exhausted phase (it also stops the Metro preflight
+# started).
+slice
+feature-1
+feature-2
+feature-3
+feature-4
+feature-5
+feature-6
+feature-7
+feature-8
+!digest

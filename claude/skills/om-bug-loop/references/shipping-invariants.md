@@ -55,9 +55,9 @@ Break any of these and the work is void, however good the result looks.
 
 ## The hand-step line: authorship, not size
 
-Where **no new contract is authored** — a rebase and its conflicts, a manifest
-re-pin, a version bump, the PR section and `train.ts ship` — the diff is yours to
-hand-write, and always was. **Name it as a hand step** in your report.
+Where **no new contract is authored** — a rebase and its conflicts, a version
+bump, the PR section and `train.ts ship` — the diff is yours to hand-write, and
+always was. **Name it as a hand step** in your report.
 
 But if a conflict hunk lands inside the change's own logic it stops being
 mechanical: send it to Codex. *"Both sides edited the same behaviour"* is a

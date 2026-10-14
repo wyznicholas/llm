@@ -94,4 +94,4 @@ plan or in `PROVENANCE.md`, because no successor will rediscover them.
 
 **FAIL** — write a precise failure report to `<evidence_dir>/review-fail.md`: what check, expected vs observed, suspected cause. Push nothing, write no card note.
 
-**(chat lane)** Respect the owner's house rules: no AI attribution, no `git stash`, exact-path staging, the parity fence.
+**(chat lane)** Respect the owner's house rules: no AI attribution, no `git stash`, exact-path staging.

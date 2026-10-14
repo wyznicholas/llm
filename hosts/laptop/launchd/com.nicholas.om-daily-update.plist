@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nicholas.om-daily-update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nicholas/.local/bin/om-daily-update</string>
+  </array>
+  <!-- 19:30 Mon-Sat. The team posts theirs between 19:30 and 20:30, so this
+       lands with the pack rather than after @openmarket has read the others.
+       Sunday is skipped; the cursor runs from the last successful post, so
+       Monday's update covers the weekend automatically with no special-casing.
+       Weekday 1=Mon .. 6=Sat. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <!-- claude, gh, glab and om all live outside launchd's default PATH, which is
+       just /usr/bin:/bin:/usr/sbin:/sbin. The script re-exports its own PATH
+       too; this is belt-and-braces. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/nicholas/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/nicholas/.claude/daily-updates/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nicholas/.claude/daily-updates/logs/launchd.err</string>
+</dict>
+</plist>

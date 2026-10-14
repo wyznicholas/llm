@@ -71,7 +71,7 @@ may:
 must_not:
   - write the product diff — that is Codex's, always
   - lower a tier, or ship after an escalation trigger fired
-  - merge, or run gh pr create
+  - merge, or run gh pr create / glab mr create / a direct forge call
 escalate_when:        # kanban.ts tier <ref> normal --why "…", then stop
   - the mechanism is not where the card says, or not found at a file:line within 15 minutes
   - the fix needs a second source file (its own test file does not count)

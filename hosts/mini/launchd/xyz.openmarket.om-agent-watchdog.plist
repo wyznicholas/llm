@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>xyz.openmarket.om-agent-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/Cellar/bun/1.3.14/bin/bun</string>
+    <string>run</string>
+    <string>src/watchdog.ts</string>
+  </array>
+  <!-- The working directory is the checkout so Bun loads .env from it. The Discord webhook and
+       the off-host monitor URL are secrets and must never appear in a plist: these files are
+       world-readable, unlike a 0600 .env. -->
+  <key>WorkingDirectory</key>
+  <string>/Users/ombot/repos/om-agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OM_AGENT_STATE_DIR</key>
+    <string>/Users/ombot/repos/om-agent/.state</string>
+    <key>OM_AGENT_WATCH_LABEL</key>
+    <string>xyz.openmarket.om-agent</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/Cellar/bun/1.3.14/bin:/Users/ombot/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/ombot/repos/om-agent/.state/watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ombot/repos/om-agent/.state/watchdog.log</string>
+</dict>
+</plist>

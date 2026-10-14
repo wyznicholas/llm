@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nicholas.claude-workflow-review</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nicholas/.local/bin/claude-workflow-review</string>
+  </array>
+  <!-- Weekdays only, at 08:47. The subject is Nicholas's own interactive work,
+       which largely stops at the weekend, and the review window runs from the
+       last successful run rather than a fixed 24h — so Monday's report covers
+       Fri-through-Sun automatically with no special-casing. Two thin Sat/Sun
+       reports would only dilute the Monday one. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>47</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>47</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>47</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>47</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>47</integer></dict>
+  </array>
+  <!-- claude, jq and brew all live outside launchd's default PATH; the script
+       re-exports its own PATH too, this is belt-and-braces. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/nicholas/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/nicholas/.claude/workflow-reviews/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nicholas/.claude/workflow-reviews/logs/launchd.err</string>
+</dict>
+</plist>

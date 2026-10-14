@@ -4,7 +4,7 @@
 
 **You never write the diff for a plan you wrote.** Every change implementing the plan goes through `codex exec`, including one-line ports and changes you could obviously make faster by hand. **There is no size exception here** — a one-liner is exactly where the exception looks harmless, and granting it once dissolves the rule. The reason is not token cost: you authored the contract, so implementing it yourself means grading your own homework, which is the one thing this pipeline is built to prevent.
 
-**The line is authorship, not size.** Where **no new contract is being authored**, the diff is yours to write by hand, and always was — see the hand steps below. That covers a rebase and its conflict resolutions, a parity-manifest hash re-pin, a version bump, opening the MR. In those cases the design decision was already made and already verified in an earlier round; you are reconciling someone else's approved work with the tree, not deciding what the fix should be, so there is no homework to grade.
+**The line is authorship, not size.** Where **no new contract is being authored**, the diff is yours to write by hand, and always was — see the hand steps below. That covers a rebase and its conflict resolutions, a version bump, opening the MR. In those cases the design decision was already made and already verified in an earlier round; you are reconciling someone else's approved work with the tree, not deciding what the fix should be, so there is no homework to grade.
 
 Two obligations when you hand-write a resolution, both firm:
 
@@ -74,7 +74,7 @@ Two other shape-level tells worth a glance at the `--stat` alone: a test file wi
 
 Everything below that — correctness, house conventions, whether the mechanism is right — belongs to `om-verifier`, which reads the contents and is the independent party.
 
-Genuinely non-Codex steps — writing the PR section and running `train.ts ship` (there is no per-task MR to open since 2026-09-15), a version bump, a parity-manifest hash edit, a rebase and its conflict resolutions — are yours, and must be **named as hand steps** in your report rather than blurred into the Codex run.
+Genuinely non-Codex steps — writing the PR section and running `train.ts ship` (there is no per-task MR to open since 2026-09-15), a version bump, a rebase and its conflict resolutions — are yours, and must be **named as hand steps** in your report rather than blurred into the Codex run.
 
 **Environment**, before anything: read **the environment reference your dispatch prompt names** — `references/openmarket-chat-env.md` for a `product: chat` task, `references/kiyotaka-chart-env.md` for `product: chart`. They differ in package manager, app, ports and gates; never read one lane's and work in the other. Fresh sibling worktree off `origin/main`, never the shared checkout. **Chat: never `bun install`** — private scopes 404 and it destroys the symlink overlay. **Chart: copy `.env` from the shared checkout into the worktree first** — it is untracked, so a fresh worktree has none and vite boots misconfigured in silence. **Capture the baseline BEFORE any edit**; gates are already red on `main`, so the obligation is a failure-**set** diff, never a green gate. Never `git stash`, never `git add -A`, `grep -a`, no AI attribution anywhere. Namespace every scratch path by task ref.
 

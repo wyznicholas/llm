@@ -113,6 +113,6 @@ not.
 ## Risk
 
 - **Blast radius:** {{blast_radius}}
-- **(chat lane)** **Shared files touched:** {{shared_files}} <!-- parity fence: bun tools/sync-shared.ts --diff -->
+- **(chat lane)** **Shared files touched:** {{shared_files}}
 - **regression-impact-check:** {{regression_impact}} <!-- required when kiyotaka-frontend is touched -->
 - **Rollback:** {{rollback}}

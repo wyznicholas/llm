@@ -12,7 +12,7 @@
 
 **Before the card can reach `Review`:** before/after screenshots on the same viewport, on the shipped commit and its real merge-base, copied into the vault and embedded with vault-relative full paths — **view every image before embedding it**, a wrong build has been installed as a `before` frame and only looking caught it. A change with genuinely no visual surface says **"No UI surface"** and why. Card note from the template via `kanban.ts note <task> --file <md>`, with `## Work items` one box per plan step **verbatim**; never hand-write between the `om-bug-loop:status` markers. Feature Map entry via `kanban.ts feature <task>`.
 
-Then ship onto your surface's train — **never `gh pr create`** (2026-09-15). Write your PR section to `$EVIDENCE/<ref>/pr-section.md`, run `train.ts ship <ref> --surface <key> … --test-cmd "<runner prefix>" --test-list "$EVIDENCE/<ref>/scoped-tests.txt"` (one test path per line), re-run your scoped tests on the rebased tip with the command it prints, and ship with `--verified <log>`. That pushes without force, creates or regenerates the batch PR, and writes `mrUrl` + `train` into `tasks.json` itself; backfill `branch`/`worktree` the same read-modify-write way, and remove the worktree only after the card reaches `Review`. → `trains.md`
+Then ship onto your surface's train — **never `gh pr create`, `glab mr create`, or a direct forge call** (2026-09-15). Write your PR/MR section to `$EVIDENCE/<ref>/pr-section.md`, run `train.ts ship <ref> --surface <key> … --test-cmd "<runner prefix>" --test-list "$EVIDENCE/<ref>/scoped-tests.txt"` (one test path per line), re-run your scoped tests on the rebased tip with the command it prints, and ship with `--verified <log>`. That pushes without force, creates or regenerates the batch PR/MR on the forge selected from `origin`, and writes `mrUrl` + `train` into `tasks.json` itself; backfill `branch`/`worktree` the same read-modify-write way, and remove the worktree only after the card reaches `Review`. → `trains.md`
 
 
 ## A rebase that does not change your diff does not need re-verifying
@@ -25,4 +25,3 @@ everything anyway.
 
 If the delta is *not* identical, the rebase changed your change: treat it as new
 work and re-verify properly.
-

@@ -17,7 +17,7 @@ Run this set yourself, on both arms. Never reuse the owner's run:
 
 1. **The plan's declared test files.**
 2. **Every test file that imports a changed module**, found by grepping imports of each changed file (`grep -a -rlE` in `openmarket-chat`, where NUL-poisoned files skip silently otherwise). Include dynamic imports: a regression file set has missed every test using a dynamic import before.
-3. **The filesystem-scanning ratchets and the parity-fence tests**, always, whatever the diff touches. Deleting or moving a component trips ratchets a rebase never reveals, so the branch merges clean and then goes red. These run in seconds.
+3. **The filesystem-scanning ratchets**, always, whatever the diff touches. Deleting or moving a component trips ratchets a rebase never reveals, so the branch merges clean and then goes red. These run in seconds.
 
 Diff failure **sets**, never counts, against the same merge-base. The gates are already red on `main`, so a bare pass/fail says nothing:
 

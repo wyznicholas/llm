@@ -158,12 +158,34 @@ export function groupLine(
 
 export function groupTarget(entry: TaskLike, column: string | undefined): string | null {
   if (!(GROUP_LANES as readonly string[]).includes(column ?? "")) return null;
+  // A train member is indexed by its train card. Grouping it too put one MR on
+  // a train card AND on every category card its fixes fell into (!101 sat on
+  // three cards plus 20 loose lines, 2026-09-28).
+  if (trainFoldTarget(entry, "Review")) return null;
   if (typeof entry.ref !== "string" || !/^[TF]\d+$/i.test(entry.ref)) return null;
   const category = categoryFor(entry.category);
   if (!category?.grouped) return null;
   if (summaryProblem(entry.summary) !== null) return null;
   if (typeof entry.groupExempt === "string" && entry.groupExempt.trim()) return null;
   return groupId(column!, category.key);
+}
+
+/**
+ * The train card a shipped member folds into while it sits in Review.
+ *
+ * One card per MR (Nicholas, 2026-09-18; restated 2026-09-28): a card may list
+ * several MRs, but an MR is on exactly one card. `train.ts ship` still moves the
+ * member through `upsert --column Review` so the Review gate runs, and that used
+ * to leave the member's own line in Review beside its train card — 26 trains
+ * showed up on more than one card. Done folds too, or `train.ts landed` would
+ * rebuild every duplicate there. Other lanes keep the member's own line: a
+ * dropped fix in Need Attention is its own question, not the MR's.
+ */
+export function trainFoldTarget(entry: TaskLike, column: string | undefined): string | null {
+  if (column !== "Review" && column !== "Done") return null;
+  if (typeof entry.train !== "string" || !entry.train.trim()) return null;
+  if (typeof entry.mrUrl !== "string" || !entry.mrUrl.trim()) return null;
+  return `train-${entry.train}`;
 }
 
 export const PLAY_AROUND_ORIGIN = "om-play-around";
@@ -205,8 +227,15 @@ export function isFeatureCard(ref: string | null | undefined, tags: string[]): b
  * written by `file-finding`, carried into tasks.json as `origin` by `consume`,
  * and never inferred from title text, tags, or evidence names.
  */
-export function playAroundCap(priority: string, origin: unknown, feature: boolean): string {
-  return priority.toLowerCase() === "high" && origin === PLAY_AROUND_ORIGIN && !feature
+export function playAroundCap(
+  priority: string, origin: unknown, feature: boolean, tags: readonly string[] = [],
+): string {
+  // mobile-charts is exempt: Nicholas ruled every mobile-charts card #high
+  // (2026-10-02), and web-port-scout files ported fixes as #bug through
+  // file-finding, which writes the play-around marker. Same exemption as
+  // file-finding's own cap.
+  const mobileCharts = tags.some(tag => tag.toLowerCase() === "#mobile-charts");
+  return priority.toLowerCase() === "high" && origin === PLAY_AROUND_ORIGIN && !feature && !mobileCharts
     ? "medium"
     : priority;
 }
@@ -240,6 +269,11 @@ export const PROJECT_TAGS: Record<string, string> = {
    *  web-parity intake. It is a TAG, not a board column: mobile cards ride the
    *  same lanes as everything else and are found with `#mobile`. */
   mobile: "mobile",
+  /** The OpenMarket mobile charts app (`kiyotaka-frontend-app`, Expo,
+   *  `com.kiyotaka.frontendapp`). Added 2026-10-02 for the ⌗ mobile topic's
+   *  to-dos (room 7950af2f4f4a, topic 86675ae4). Distinct from `mobile`,
+   *  which is OpenFloor (`openmarket-chat-app`). */
+  "mobile-charts": "mobile-charts",
 };
 export const DEFAULT_PRODUCT = "chat";
 /** The board is ONE surface shared by several products, so the project tag has
@@ -534,6 +568,9 @@ export const FEATURE_MAP_DIRS: Record<string, string> = {
    *  card judged against the chat map would be graded on a surface it does not
    *  have. Symlink, like `features`, so the vault stays the one home. */
   mobile: "/Users/nicholas/.claude/skills/om-bug-loop/references/features-mobile",
+  /** kiyotaka-frontend-app's map, started 2026-10-02 (vault
+   *  `openmarket-mobile-charts/Feature Map/`, symlinked like the others). */
+  "mobile-charts": "/Users/nicholas/.claude/skills/om-bug-loop/references/features-mobile-charts",
 };
 
 /** The chat map, and the fallback. Retained under its old name because it is
@@ -942,6 +979,11 @@ export interface TaskLike {
   /** Group membership plus the exact board line parked while grouped. */
   groupedIn?: string | null;
   groupedLine?: string | null;
+  /** Train surface key, written by `train.ts ship` beside `mrUrl`. */
+  train?: string | null;
+  /** The exact board line parked while the member is folded into its train
+   *  card; `upsert` puts it back before moving the member anywhere else. */
+  trainLine?: string | null;
   /** Board title retained while the member has no individual board line. */
   title?: string | null;
   /** `chat` | `chart` — which product lane this task runs in, and therefore
@@ -1329,7 +1371,7 @@ export function groupNote(
     const title = String(member.title ?? member.slug).replace(/^(?:✓\s*)+/, "");
     const summary = member.summary as CardSummary;
     const suffix = lane === "Review" && typeof member.mrUrl === "string" && member.mrUrl.trim()
-      ? `PR ${member.mrUrl.trim()}` : "";
+      ? `${member.mrUrl.includes("/-/merge_requests/") ? "MR" : "PR"} ${member.mrUrl.trim()}` : "";
     lines.push(
       "", `## ${ref} · ${title}`, "",
       `[[${cardTarget(board, member.slug)}|full note]]${suffix ? ` · ${suffix}` : ""}`,
@@ -1468,7 +1510,40 @@ export function reconcileMembership(board: string, tasksPath: string, slug: stri
       }
     }
   }
+
+  // Same park-then-remove order as grouping, for the train card.
+  const lane = readBoardCards(board).get(slug)?.column;
+  if (trainFoldTarget(entry, lane)) foldIntoTrain(board, tasksPath, slug);
   syncGroups(board, tasksPath);
+}
+
+/** Park a member's board line in `trainLine` and take it off the board. */
+function foldIntoTrain(board: string, tasksPath: string, slug: string): void {
+  const raw = JSON.parse(readFileSync(tasksPath, "utf8")) as Record<string, TaskLike>;
+  const entry = raw[slug];
+  const before = readFileSync(board, "utf8");
+  const matcher = cardMatcher(slug);
+  const lines = before.split("\n");
+  const index = lines.findIndex(line => matcher.test(line));
+  if (!entry || index < 0) return;
+  entry.trainLine = stripReviewSkipMark(lines[index]!);
+  atomicWrite(tasksPath, `${JSON.stringify(raw, null, 1)}\n`);
+  lines.splice(index, 1);
+  atomicWrite(board, lines.join("\n"));
+}
+
+/** Put a folded member's parked line back so a move keeps its tags and embeds. */
+function unfoldFromTrain(board: string, tasksPath: string, slug: string): void {
+  if (!existsSync(tasksPath)) return;
+  const raw = JSON.parse(readFileSync(tasksPath, "utf8")) as Record<string, TaskLike>;
+  const entry = raw[slug];
+  if (!entry || typeof entry.trainLine !== "string") return;
+  if (!readBoardCards(board).has(slug)) {
+    const before = readFileSync(board, "utf8").split("\n");
+    atomicWrite(board, insertIntoColumn(before, "Review", entry.trainLine).join("\n"));
+  }
+  delete entry.trainLine;
+  atomicWrite(tasksPath, `${JSON.stringify(raw, null, 1)}\n`);
 }
 
 /**
@@ -1601,6 +1676,19 @@ export function listRows(tasksPath: string, board: string): ListRow[] {
       };
     }
     const card = cards.get(task.slug);
+    // A folded train member lives on its train card, which carries the lane.
+    if (!card && typeof task.trainLine === "string" && task.train) {
+      const trainCard = cards.get(`train-${task.train}`);
+      return {
+        ref: typeof task.ref === "string" ? task.ref : "-",
+        slug: task.slug,
+        status: task.status ?? "-",
+        column: trainCard?.column ?? "-",
+        title: (task.title as string | undefined) ?? task.slug,
+        group: `train-${task.train}`,
+        drift: trainCard ? null : `train card train-${task.train} missing from the board`,
+      };
+    }
     return {
       ref: typeof task.ref === "string" ? task.ref : "-",
       slug: task.slug,
@@ -1660,7 +1748,7 @@ function advance(
  *  (`T5`) just as happily as a slug. */
 const REF_COMMANDS = new Set([
   "upsert", "note", "stamp", "stage", "check", "feature", "priority",
-  "categorize", "status",
+  "categorize", "status", "tier",
 ]);
 
 /** One rendered line per task, shared by `traincard` and `lanecard`.
@@ -1882,7 +1970,7 @@ function main(): number {
     // The ledger must agree with Nicholas's tag because the coordinator
     // dispatches by the ledger; hit live 2026-09-15 on F64/F66/T186/T189.
     const requestedPriority = argValue("--priority") ?? linePriority(line) ?? DEFAULT_PRIORITY;
-    const priority = playAroundCap(requestedPriority, origin, isFeatureCard(ref, lineTags));
+    const priority = playAroundCap(requestedPriority, origin, isFeatureCard(ref, lineTags), lineTags);
     if (priority !== requestedPriority) {
       process.stderr.write(
         `capped #high → #medium for ${ref}: play-around cards that are not features max out at medium (Nicholas, 2026-09-17)\n`);
@@ -1970,7 +2058,15 @@ function main(): number {
     const noteFile = argValue("--file");
     if (!title || !noteFile) {
       process.stderr.write(
-        'usage: kanban.ts file-finding "<short title>" --file <body.md> [--tags "#low #bug"] [--parent <ref>]\n');
+        'usage: kanban.ts file-finding "<short title>" --file <body.md> [--tags "#low #bug"] [--parent <ref>] [--column todo|"Need Attention"]\n');
+      return 64;
+    }
+    // web-port-scout parks its questions as raw lines in Need Attention, where
+    // Nicholas answers and drags them to `todo` (port) or `Withdrawn` (skip).
+    // Only those two intake columns: anything else would bypass the lifecycle.
+    const column = argValue("--column") ?? "todo";
+    if (column !== "todo" && column !== "Need Attention") {
+      process.stderr.write(`--column must be "todo" or "Need Attention", got ${JSON.stringify(column)}\n`);
       return 64;
     }
     const problem = titleProblem(title);
@@ -2066,7 +2162,9 @@ function main(): number {
       }
     }
 
-    if (hasTag("#high") && !hasTag("#feature")) {
+    // mobile-charts is exempt: Nicholas ruled every mobile-charts card #high
+    // (2026-10-02), and web-port-scout files ported fixes as #bug.
+    if (hasTag("#high") && !hasTag("#feature") && !hasTag("#mobile-charts")) {
       tags = tags.split(/\s+/)
         .map(tag => tag.toLowerCase() === "#high" ? "#medium" : tag)
         .join(" ");
@@ -2095,7 +2193,7 @@ function main(): number {
 
     const raw = `- [ ] ${title}${tags ? ` ${tags}` : ""}`;
     atomicWrite(board, insertIntoColumn(
-      readFileSync(board, "utf8").split("\n"), "todo", raw).join("\n"));
+      readFileSync(board, "utf8").split("\n"), column, raw).join("\n"));
     process.stdout.write(`filed · ${slug}\n${raw}\n  note: ${note}\n`);
     return 0;
   }
@@ -2141,10 +2239,21 @@ function main(): number {
     // Every MR any member rides. A cross-repo fix contributes a second one —
     // that is the whole "one card, many MRs" case, and the inverse (several
     // cards for one MR) is what this command exists to make impossible.
+    // An MR that is another train's own PR is already on that train's card, so a
+    // cross-repo member's second URL stays there (#945 sat on both the settings
+    // and mobile-redesign cards, 2026-09-28).
+    const ownedElsewhere = new Set(Object.values(tasks)
+      .filter(task => { const t = field<string>(task, "train"); return t && t !== key; })
+      .map(task => field<string>(task, "mrUrl"))
+      .filter((url): url is string => !!url));
     const mrUrls: string[] = [];
     for (const task of members) {
       const urls = [field<string>(task, "mrUrl"), ...(field<string[]>(task, "mrUrls") ?? [])];
-      for (const url of urls) if (url && !mrUrls.includes(url)) mrUrls.push(url);
+      for (const url of urls) {
+        if (url && !mrUrls.includes(url) && (url === field<string>(task, "mrUrl") || !ownedElsewhere.has(url))) {
+          mrUrls.push(url);
+        }
+      }
     }
     if (mrUrls.length === 0) {
       process.stderr.write(`train ${key} has no MR yet — nothing to index\n`);
@@ -2157,6 +2266,19 @@ function main(): number {
     // one is actually open rather than trusting ledger order.
     const stateOf = new Map<string, string>();
     for (const url of mrUrls) {
+      const gitlab = /^https:\/\/([^/]+)\/(.+)\/-\/merge_requests\/(\d+)\/?$/.exec(url);
+      if (gitlab) {
+        try {
+          const raw = execFileSync(process.env.KANBAN_GLAB ?? process.env.TRAIN_GLAB ?? "glab", [
+            "api", "--hostname", gitlab[1]!,
+            `projects/${encodeURIComponent(gitlab[2]!)}/merge_requests/${gitlab[3]}`,
+          ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+          const state = String(JSON.parse(raw).state ?? "").toLowerCase();
+          stateOf.set(url, state === "merged" ? "merged"
+            : state === "opened" || state === "locked" ? "open" : "closed");
+        } catch { /* offline: treat as unknown, still listed */ }
+        continue;
+      }
       const parsed = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url);
       if (!parsed) continue;
       try {
@@ -2469,6 +2591,13 @@ function main(): number {
       process.stderr.write(`no entry for "${slug}" in ${tasksPath}\n`);
       return 1;
     }
+    if (!isTier(entry.tier) && entry.status === "new") {
+      entry.tier = level;
+      entry.tierSource = "judged";
+      atomicWrite(tasksPath, `${JSON.stringify(tasks, null, 1)}\n`);
+      process.stdout.write(`${entry.ref ?? slug}: tiered ${level} (intake)\n`);
+      return 0;
+    }
     const from = isTier(entry.tier) ? entry.tier : "normal";
     if (tierRank(level) <= tierRank(from)) {
       process.stderr.write(`${entry.ref ?? slug} is ${from}; a tier can only move up\n`);
@@ -2678,6 +2807,9 @@ function main(): number {
       ungroupMember(board, tasksPath, slug);
       task = readTasks(tasksPath)[slug];
     }
+    // A folded train member has no line; without this, moveCard would invent
+    // one titled with the bare slug (e.g. `train.ts drop` → Need Attention).
+    unfoldFromTrain(board, tasksPath, slug);
     const before = readFileSync(board, "utf8");
     const prio = task?.priority ?? DEFAULT_PRIORITY;
     const after = moveCard(before, slug, column, title, board, prio, task?.product);

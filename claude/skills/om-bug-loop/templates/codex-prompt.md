@@ -16,9 +16,6 @@ House rules (non-negotiable):
   (Hit live 2026-09-04: Codex ran `pnpm install --frozen-lockfile` because the
   prompt named only `bun install` — name every package manager, not just the
   lane's own. It exited before mutating anything: luck, not design.)
-- **(chat lane)** openmarket-chat shared files: run `bun tools/sync-shared.ts --diff` after
-  editing anything the parity manifest tracks, and say in the commit body
-  which shared files changed.
 - **(chart lane)** `pnpm`, never `bun`. `.env` is untracked — the worktree needs
   a copy. `pnpm typecheck` is red on `main` with ~1428 errors: diff the error
   set for the files you touched, never read its exit code as a verdict.

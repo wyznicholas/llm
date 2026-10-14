@@ -1,0 +1,4 @@
+# Pinned to Sonnet: rule 1 is a census -- >=30 days default-on, zero flips, zero override sites. That is
+# git log and greps, and the kill-switch rule is a name match.
+# Opus remains the default for every routine whose rule 1 is a judgement call.
+claude-sonnet-5

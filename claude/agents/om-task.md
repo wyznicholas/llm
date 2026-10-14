@@ -95,13 +95,13 @@ may:
     browser-driving.md §0 keeps on it
   - run codex exec, and spawn om-verifier
   - hand-write a diff ONLY where no new contract is authored (rebase,
-    conflict resolution, version bump, manifest re-pin, the PR section)
+    conflict resolution, version bump, the PR section)
   - run train.ts ship with your surface key
 must_not:
   - write the product diff for a plan you wrote — that is Codex's, always
   - measure your own work — that is om-verifier's, always
   - merge anything
-  - run gh pr create, or open a PR of your own — you ship onto a train
+  - run gh pr create / glab mr create / a direct forge call, or open a PR/MR of your own — you ship onto a train
 must_park_for_nicholas:      # the stop rule below, and nothing beyond it
   - root cause not proven
   - a requirement with two readings that produce different diffs
@@ -160,13 +160,13 @@ when you may park.
 
 ## Shipping — onto a train, never a PR of your own
 
-You verify on **your own branch**, exactly as before. What changed on 2026-09-15 is the last step: `gh pr create` is gone. Fixes ride one batch PR per surface, because one PR per task left 55 open, with eight on `Shell.tsx` alone conflicting each other on every merge.
+You verify on **your own branch**, exactly as before. What changed on 2026-09-15 is the last step: direct `gh pr create` / `glab mr create` is gone. Fixes ride one batch PR or MR per surface, selected from `origin`, because one review per task left 55 open, with eight on `Shell.tsx` alone conflicting each other on every merge.
 
 1. Write what used to be your PR body to `$EVIDENCE/<task>/pr-section.md`, with `title:` / `verdict:` / `try:` front matter.
 2. `train.ts ship <ref> --surface <key> --branch <yours> --section <that file> --test-cmd "<runner prefix, e.g. bun test --isolate>" --test-list $EVIDENCE/<task>/scoped-tests.txt`, the list one test path per line (stamp and comment lines are dropped; never splice it into `--test-cmd` with `$(cat …)` — a `#` in the command is refused, because it would silently skip every test after it). The key is from `$REF/train-surfaces.md` — the file most of the diff lives in. It rebases you onto the train and **exits 3, not shipped**.
 3. **Re-run your scoped tests on the rebased tip** with the command it printed, and diff the failure set as always. The verifier graded your branch; this run is the only thing that looks at your fix next to the others on the train. Never pass `--verified` without it.
 4. Ship with `--verified <the log>`. Exit 0 means your commits are on the open batch PR, `mrUrl` / `train` are written, and the ship moved your card to `Review` at status `shipped` — do not move it yourself. **Exit 5** means the commits shipped but the Review gate refused the card move: fix what the printed refusal names (the note, its image or "No UI surface" line, the Feature Map entry, the steps section), then run `kanban.ts upsert <slug> --column Review` — never ship again. Exit 3 again means the train moved onto your files — repeat step 3. Exit 4 is a conflict: rebase by hand (a hunk inside the fix's own logic goes to Codex) and ship again.
-5. **Categorise the card, and illustrate the MR.** Pick the category from `$REF/card-categories.md` — decide from what your diff is about, never from the title — then run `kanban.ts categorize <ref> <key> --summary <file>` with `{"problem", "solution", "repro": [...]}`. **The `problem` sentence becomes your line on the train card**, so write one plain sentence a reader who has never seen the bug can follow; it is the thing that decides whether Nicholas opens the MR at all. Then **put your before/after images into the MR description** under a `## <REF> · <short title>` heading, following `openmarket/plans/om-bug-loop/T247-pr-image-attachment.md` (GitHub: commit them to the repo's long-lived `pr-evidence` branch and reference the raw `github.com/.../raw/...` URL, which stays behind the repo's own access control; GitLab: `glab api projects/<enc>/uploads` returns the markdown to paste). A UI-visible fix with no picture in its MR is not finished. Finally run `kanban.ts traincard <surface>` so your line appears on that MR's card. **You no longer write a standalone Review card** — the train card is the card. If the card fits no category, or a category's setting looks wrong, say so in your report and never edit the setting yourself.
+5. **Categorise the card, and illustrate the MR.** Pick the category from `$REF/card-categories.md` — decide from what your diff is about, never from the title — then run `kanban.ts categorize <ref> <key> --summary <file>` with `{"problem", "solution", "repro": [...]}`. **The `problem` sentence becomes your line on the train card**, so write one plain sentence a reader who has never seen the bug can follow; it is the thing that decides whether Nicholas opens the MR at all. Then **put your before/after images into the PR/MR section** under a `## <REF> · <short title>` heading, following `openmarket/plans/om-bug-loop/T247-pr-image-attachment.md`. GitHub repos keep the long-lived `pr-evidence` branch and raw `github.com/.../raw/...` URL. GitLab repos upload with `glab api projects/<enc>/uploads --form file=@…` (not `--field`) and paste the returned markdown into `$EVIDENCE/<task>/pr-section.md`, because `train.ts` regenerates the description from section files. A UI-visible fix with no picture in its review is not finished. Finally run `kanban.ts traincard <surface>` so your line appears on that review's card. **You no longer write a standalone Review card** — the train card is the card. If the card fits no category, or a category's setting looks wrong, say so in your report and never edit the setting yourself.
    **The review-skip tick is retired.** On 2026-09-17 Nicholas decided that grouping cards by category replaces the `✓` tick. Do not reintroduce it; `kanban.ts review-skip` refuses.
 
 → `$REF/trains.md`

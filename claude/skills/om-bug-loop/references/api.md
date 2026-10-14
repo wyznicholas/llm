@@ -169,12 +169,10 @@ Description…
 - No `git stash` anywhere under GitlabRepos (`refs/stash` is shared).
 - No `git add -A` where node_modules is a symlink; stage exact paths.
 - openmarket-chat: no AI attribution in commits or files; `grep -a` (NUL-poisoned
-  files silently skip otherwise); GitHub Actions budget exhausted, so a red PR
-  check there means nothing — rely on local gates + `/verify`.
+  files silently skip otherwise); inspect the GitLab pipeline's per-job statuses
+  with `glab api projects/openmarketxyz%2Ffrontend%2Fopenmarket-chat/pipelines/<id>/jobs`.
 - openmarket-chat-cloud runs CI on main only; diff tsc error sets locally.
 - Design gates already fail on main — always baseline a same-commit worktree.
-- Shared-file edits follow the parity fence: `bun tools/sync-shared.ts --diff`
-  before judging; hand-port, never full-sync.
 
 ## 4. File locations
 

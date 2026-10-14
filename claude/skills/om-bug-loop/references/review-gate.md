@@ -163,13 +163,13 @@ overwritten; the whole point of a second opinion is lost if it lands on the
 first one's path.
 
 Known-noise, do not misread — but **verify it rather than reciting it**. The
-durable rule is the comparison: run `main`'s workflow at the same base, compare
-**per-step conclusions**, and require the PR's failure set to be a **subset**,
+durable rule is the comparison: run `main`'s pipeline at the same base, compare
+**per-job statuses**, and require the MR's failure set to be a **subset**,
 never that it be green.
 
 ```bash
-gh api repos/openmarket-xyz/openmarket-chat/actions/runs/<id>/jobs \
-  -q '.jobs[].steps[] | "\(.number) \(.name): \(.conclusion)"'
+glab api "projects/openmarketxyz%2Ffrontend%2Fopenmarket-chat/pipelines/<id>/jobs" \
+  --paginate | jq -r '.[] | "\(.name): \(.status)"'
 ```
 
 The specific conditions rot fast, and two of them already have. As of
@@ -197,4 +197,3 @@ What DOES carry over is the guard, and it is the whole reason those subsections
 exist: prove which commit each arm is actually serving, from that worktree's own
 HEAD, before you measure anything with it. An arm you cannot tie to a commit is
 void either way.
-

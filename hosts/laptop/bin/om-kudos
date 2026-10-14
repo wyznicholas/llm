@@ -1,0 +1,10 @@
+#!/bin/bash
+# Installed by om-agent tools/kudos/install.sh — edit the repo, then re-install.
+# Kill switch: touch /Users/nicholas/.local/state/kudos/PAUSED
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if [[ -e "/Users/nicholas/.local/state/kudos/PAUSED" && " $* " != *" --dry-run "* ]]; then
+  echo "paused (/Users/nicholas/.local/state/kudos/PAUSED exists)"; exit 0
+fi
+cd "/Users/nicholas/.local/share/kudos"
+exec "/Users/nicholas/.bun/bin/bun" "/Users/nicholas/.local/share/kudos/run.ts" "$@"

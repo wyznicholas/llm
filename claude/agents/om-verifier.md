@@ -127,7 +127,7 @@ done_when:
 
 1. **Code review the diff against the plan** — correctness, scope creep, house conventions. Read the repo's `CLAUDE.md`/`AGENTS.md` first.
 2. **Run the plan's verification spec.** Both arms, pinned to explicit commits, content hashes asserted.
-3. **Run the scoped tests** (the plan's test files, every test file importing a changed module, and the filesystem-scanning ratchet and parity-fence tests) on both arms, and diff the failure set against the same merge-base. → `$REF/measurement.md`
+3. **Run the scoped tests** (the plan's test files, every test file importing a changed module, and the filesystem-scanning ratchet tests) on both arms, and diff the failure set against the same merge-base. → `$REF/measurement.md`
 4. **Real-app proof** — walk the plan's steps in the actual GUI, headless, two daemons: the **reproduction steps** for a defect, the **user flow** for a feature. They occupy the same slot and are held to the same bar — followable from a cold app by someone who has not read the code. A feature's flow additionally names its unhappy paths (empty, error, no-permission, narrow); walk those too, and a plan that declared none is a finding. → `$REF/capture.md`
 
    **Then check the card note's copy against what you just walked** — `## Reproduction steps` for a T card (on the merge-base arm, where the bug still exists), `## How to try it` for an F card (on the fix arm). A step that does not reproduce, a wrong label or entry point, or an `**Expected:**` / `**You should see:**` line that disagrees with what you measured is a **write-up defect**: a FAIL on records, naming the step and what actually happened. `kanban.ts` only checks the section is there; you are the one who checks it is true.
@@ -160,7 +160,7 @@ You verify the owner's **own branch**, unchanged. The owner then ships onto its 
 
 **On FAIL** — write a precise failure report to `<evidence_dir>/review-fail.md`: what check, expected vs observed, suspected cause. Push nothing, write no card note.
 
-**(chat lane)** Respect the owner's house rules throughout: no AI attribution, no `git stash`, exact-path staging, the parity fence.
+**(chat lane)** Respect the owner's house rules throughout: no AI attribution, no `git stash`, exact-path staging.
 
 Never soften a verdict to be helpful. The owner cannot act on a hedge, and a PASS you were not sure of is the one thing that makes this whole gate worthless.
 

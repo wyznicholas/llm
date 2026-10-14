@@ -169,6 +169,14 @@ _assert_clone_settings_paths() {
     return 1
   }
 
+  # clone_home deletes pre-migrate snapshots because nothing below inspects them.
+  local snapshot
+  snapshot="$(find "$dest/accounts" \( -type f -o -type l \) -name 'om.sqlite.pre-migrate-*' -print | head -n 1)"
+  if [ -n "$snapshot" ]; then
+    echo "assert_clone_inert: uninspected pre-migrate snapshot in clone: $snapshot" >&2
+    return 1
+  fi
+
   local db uri rows
   while IFS= read -r db; do
     [ -n "$db" ] || continue
@@ -249,6 +257,14 @@ clone_home() {
     \( -name om.sqlite-shm -o -name om.sqlite-wal -o -name runner.boot.marker -o -name .om-runner.lock \) \
     -exec rm -f {} + || {
       echo "clone_home: failed to remove copied account runtime artifacts under $dest/accounts" >&2
+      return 1
+    }
+  # T246 follow-up: pre-migrate snapshots carry the same settings table as om.sqlite but
+  # are never rewritten or inspected, so a restore from one would bring real-home paths
+  # back unseen. A clone never needs to roll back a migration — re-clone instead.
+  find "$dest/accounts" \( -type f -o -type l \) -name 'om.sqlite.pre-migrate-*' \
+    -exec rm -f {} + || {
+      echo "clone_home: failed to remove copied pre-migrate snapshots under $dest/accounts" >&2
       return 1
     }
   echo "clone_home: $dest ready in $((SECONDS-t0))s"

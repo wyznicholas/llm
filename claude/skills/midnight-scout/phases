@@ -1,0 +1,15 @@
+# One phase per feature-hour, plus a guaranteed digest.
+# Each phase is its own `claude -p` session: cost is roughly quadratic in
+# session length (one 350-turn session measured at 53.5M tokens for 222K of
+# output), so an 8-hour single session is the failure mode this avoids.
+# `!digest` runs even after a failed or budget-exhausted phase.
+slice
+feature-1
+feature-2
+feature-3
+feature-4
+feature-5
+feature-6
+feature-7
+feature-8
+!digest

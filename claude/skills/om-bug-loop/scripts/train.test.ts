@@ -25,11 +25,15 @@ import {
   normalizeTestPath,
   parseBunSummary,
   parseBodyNotes,
+  parseBodyPreamble,
   parseBodySections,
   parseBodyTable,
   parseSection,
   parseSurfaces,
   parseTestList,
+  parseRemoteUrl,
+  gitlabCiSummary,
+  resolveForge,
   renderBody,
   trainTitle,
   withRef,
@@ -98,6 +102,9 @@ const value = (f) => {
   return i < 0 ? undefined : a[i + 1];
 };
 const save = () => writeFileSync(statePath, JSON.stringify(state, null, 1) + "\\n");
+state.calls ??= [];
+state.calls.push(a);
+save();
 const commits = (head) => {
   const p = Bun.spawnSync({
     cmd: [
@@ -122,7 +129,7 @@ const commits = (head) => {
         .map(messageHeadline => ({ messageHeadline }));
 };
 if (a[0] === "repo" && a[1] === "view") {
-  console.log("acme/chat");
+  console.log(process.env.GH_STUB_REPO ?? "acme/chat");
   process.exit(0);
 }
 if (a[0] === "pr" && a[1] === "list") {
@@ -175,10 +182,73 @@ if (a[0] === "pr" && a[1] === "close") {
   const p = state.prs.find(p => p.number === Number(a[2]));
   p.state = "CLOSED";
   save();
+  if (process.env.GH_STUB_TASKS) {
+    const tasks = JSON.parse(readFileSync(process.env.GH_STUB_TASKS, "utf8"));
+    tasks["second-fix"].otherOwnerWrite = "survives";
+    writeFileSync(process.env.GH_STUB_TASKS, JSON.stringify(tasks, null, 1) + "\\n");
+  }
   process.exit(0);
 }
 console.error("unsupported gh call: " + a.join(" "));
 process.exit(2);
+`;
+
+const GLAB_STUB = `#!/usr/bin/env bun
+import { readFileSync, writeFileSync } from "node:fs";
+const a = process.argv.slice(2);
+const statePath = process.env.GLAB_STUB_STATE;
+let state = JSON.parse(readFileSync(statePath, "utf8"));
+const value = f => { const i = a.indexOf(f); return i < 0 ? undefined : a[i + 1]; };
+const input = value("--input") ? JSON.parse(readFileSync(value("--input"), "utf8")) : undefined;
+state.calls ??= [];
+state.calls.push({ argv: a, ...(input === undefined ? {} : { input }) });
+const save = () => writeFileSync(statePath, JSON.stringify(state, null, 1) + "\\n");
+save();
+const path = a.find(x => x.startsWith("projects/"));
+const method = value("-X") ?? "GET";
+const base = path.split("?")[0];
+const iid = Number(/\\/merge_requests\\/(\\d+)(?:\\/|$)/.exec(base)?.[1]);
+const mr = () => state.mrs.find(x => x.iid === iid);
+const branch = head => {
+  const p = Bun.spawnSync({ cmd: ["git", "--git-dir", process.env.GH_STUB_ORIGIN,
+    "log", "--reverse", "--format=%H%x00%s", "refs/heads/main..refs/heads/" + head],
+    stdout: "pipe", stderr: "pipe" });
+  const rows = p.exitCode ? [] : p.stdout.toString().trim().split(/\\r?\\n/).filter(Boolean);
+  return { sha: rows.at(-1)?.split("\\0")[0] ?? "", commits: rows.map(x => x.split("\\0")[1]) };
+};
+if (method === "POST" && /\\/merge_requests$/.test(base)) {
+  const n = state.next++;
+  const pushed = branch(input.source_branch);
+  const row = { iid: n, web_url: "https://gitlab.com/acme/chat/-/merge_requests/" + n,
+    state: "opened", title: input.title, description: input.description,
+    source_branch: input.source_branch, target_branch: input.target_branch,
+    created_at: "2026-09-15T01:00:00.000Z", sha: state.branchSha ?? pushed.sha,
+    has_conflicts: false, detailed_merge_status: "mergeable", head_pipeline: null,
+    commits: state.nextCommits ?? pushed.commits };
+  state.mrs.push(row); state.nextCommits = undefined; save(); console.log(JSON.stringify(row)); process.exit(0);
+}
+if (method === "POST" && /\\/notes$/.test(base)) {
+  mr().notes ??= []; mr().notes.push(input.body); save(); console.log("{}"); process.exit(0);
+}
+if (method === "PUT") {
+  const row = mr();
+  if (input.title !== undefined) row.title = input.title;
+  if (input.description !== undefined) row.description = input.description;
+  if (input.state_event === "close") row.state = "closed";
+  save(); console.log(JSON.stringify(row)); process.exit(0);
+}
+if (/\\/commits$/.test(base)) {
+  console.log(JSON.stringify((mr()?.commits ?? []).map(title => ({ title })))); process.exit(0);
+}
+if (iid) { console.log(JSON.stringify(mr())); process.exit(mr() ? 0 : 1); }
+if (/\\/merge_requests$/.test(base)) {
+  const q = new URLSearchParams(path.split("?")[1] ?? "");
+  let rows = state.mrs;
+  if (q.get("source_branch")) rows = rows.filter(x => x.source_branch === q.get("source_branch"));
+  if (q.get("state") && q.get("state") !== "all") rows = rows.filter(x => x.state === q.get("state"));
+  console.log(JSON.stringify(rows)); process.exit(0);
+}
+save(); console.error("unsupported glab call: " + a.join(" ")); process.exit(2);
 `;
 
 type World = ReturnType<typeof world>;
@@ -261,14 +331,99 @@ function world() {
   chmodSync(gh, 0o755);
   const ghState = join(root, "gh.json");
   writeFileSync(ghState, JSON.stringify({ next: 1, prs: [] }, null, 1));
+  const glab = join(root, "glab-stub");
+  writeFileSync(glab, GLAB_STUB);
+  chmodSync(glab, 0o755);
+  const glabState = join(root, "glab.json");
+  writeFileSync(glabState, JSON.stringify({ next: 1, mrs: [], calls: [] }, null, 1));
   const env = commandEnv({
     ...gitEnv(root),
     TRAIN_GH: gh,
     GH_STUB_STATE: ghState,
     GH_STUB_ORIGIN: origin,
+    TRAIN_GLAB: glab,
+    GLAB_STUB_STATE: glabState,
     TRAIN_KANBAN: KANBAN,
   });
-  return { root, origin, shared, home, board, tasks, surfaces, ghState, env };
+  return { root, origin, shared, home, board, tasks, surfaces, ghState, glabState, env };
+}
+function forgeWorld(kind: "gitlab" | "github", ghRepo = "acme/chat") {
+  const w = world();
+  const raw = `https://${kind}.com/acme/chat.git`;
+  git(w.root, "config", "--global", `url.${w.origin}.insteadOf`, raw);
+  git(w.shared, "remote", "set-url", "origin", raw);
+  w.env = commandEnv({ ...w.env, GH_STUB_REPO: ghRepo });
+  return w;
+}
+function migrationWorld(conflict = false) {
+  const w = forgeWorld("gitlab");
+  const github = join(w.root, "github.git");
+  git(w.root, "init", "--bare", github);
+  const source = join(w.root, "source");
+  git(w.root, "clone", w.origin, source);
+  git(source, "checkout", "-B", "main", "origin/main");
+  writeFileSync(join(source, "source-main.txt"), "source main\n");
+  git(source, "add", "source-main.txt");
+  git(source, "commit", "-m", "source main");
+  git(source, "remote", "set-url", "origin", github);
+  git(source, "push", "-u", "origin", "main");
+  git(source, "checkout", "-b", "train/sidebar");
+  if (conflict) writeFileSync(join(source, "common.txt"), "source train\n");
+  else writeFileSync(join(source, "one.txt"), "T1\n");
+  git(source, "add", ".");
+  git(source, "commit", "-m", "T1 first migration fix");
+  writeFileSync(join(source, "two.txt"), "T2\n");
+  git(source, "add", "two.txt");
+  git(source, "commit", "-m", "T2 second migration fix");
+  git(source, "push", "-u", "origin", "train/sidebar");
+  const sourceTip = git(source, "rev-parse", "HEAD");
+
+  const destination = join(w.root, "destination");
+  git(w.root, "clone", w.origin, destination);
+  git(destination, "checkout", "-B", "main", "origin/main");
+  if (conflict) writeFileSync(join(destination, "common.txt"), "destination main\n");
+  else writeFileSync(join(destination, "destination-main.txt"), "destination main\n");
+  git(destination, "add", ".");
+  git(destination, "commit", "-m", "destination main");
+  git(destination, "push", "origin", "main");
+  git(destination, "checkout", "-b", "stale");
+  writeFileSync(join(destination, "stale.txt"), "stale\n");
+  git(destination, "add", "stale.txt");
+  git(destination, "commit", "-m", "T99 stale train");
+  git(destination, "push", "origin", "HEAD:refs/heads/train/sidebar");
+  const stale = git(destination, "rev-parse", "HEAD");
+
+  const githubUrl = "https://github.com/acme/chat.git";
+  git(w.root, "config", "--global", `url.${github}.insteadOf`, githubUrl);
+  git(w.shared, "remote", "add", "github", githubUrl);
+  const gh = JSON.parse(readFileSync(w.ghState, "utf8"));
+  gh.prs = [{ number: 9, url: "https://github.com/acme/chat/pull/9", state: "OPEN",
+    title: "train(sidebar): 2 fixes — T1, T2", body: "Source body byte-for-byte.\n",
+    headRefName: "train/sidebar", headRefOid: sourceTip,
+    createdAt: "2026-09-15T01:00:00.000Z", mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN", statusCheckRollup: [],
+    commitHeadlines: ["T1 first migration fix", "T2 second migration fix"] }];
+  writeFileSync(w.ghState, JSON.stringify(gh, null, 1));
+  const taskData = JSON.parse(readFileSync(w.tasks, "utf8"));
+  for (const slug of ["first-fix", "second-fix"]) {
+    taskData[slug].train = "sidebar";
+    taskData[slug].mrUrl = "https://github.com/acme/chat/pull/9";
+  }
+  writeFileSync(w.tasks, JSON.stringify(taskData, null, 1));
+  return { w, sourceTip, stale };
+}
+function pushDestinationTrain(w: World, refs: string[]): string {
+  const destination = join(w.root, "destination-order");
+  git(w.root, "clone", w.origin, destination);
+  git(destination, "checkout", "-B", "destination-order", "origin/main");
+  refs.forEach((ref, index) => {
+    const file = `destination-${index}.txt`;
+    writeFileSync(join(destination, file), `${ref}\n`);
+    git(destination, "add", file);
+    git(destination, "commit", "-m", `${ref} destination fix ${index}`);
+  });
+  git(destination, "push", "--force", "origin", "HEAD:refs/heads/train/sidebar");
+  return git(destination, "rev-parse", "HEAD");
 }
 function owner(w: World, slug: string, ref: string, file: string) {
   const path = join(w.root, slug);
@@ -462,6 +617,42 @@ describe("pure helpers", () => {
     expect(commitRef("Document T128 and T129 together")).toBeNull();
     expect(commitRef("fix(right-panel): give To-dos the phone sheet header (T…")).toBeNull();
   });
+  test("train titles cap a long train with an accurate omitted count", () => {
+    const refs = Array.from({ length: 95 }, (_, index) => `F${index + 1}`);
+    const prefix = "train(mobile-redesign): 95 fixes — ";
+    const title = trainTitle("mobile-redesign", refs);
+
+    expect(title.length).toBeLessThanOrEqual(255);
+    expect(title.startsWith(prefix)).toBe(true);
+    const suffix = /, \+(\d+) more$/.exec(title);
+    expect(suffix).not.toBeNull();
+    const shown = title.slice(prefix.length, -suffix![0].length).split(", ");
+    const omitted = Number(suffix![1]);
+    expect(omitted).toBeGreaterThan(0);
+    expect(omitted).toBe(95 - shown.length);
+  });
+  test("train titles preserve an unrestricted title at exactly 255 characters", () => {
+    const surface = "boundary";
+    const prefix = `train(${surface}): 1 fixes — `;
+    const refs = ["x".repeat(255 - prefix.length)];
+    const unrestricted = `train(${surface}): ${refs.length} fixes — ${refs.join(", ")}`;
+
+    expect(unrestricted.length).toBe(255);
+    expect(trainTitle(surface, refs)).toBe(unrestricted);
+  });
+  test("train titles summarize an unrestricted title at 256 characters", () => {
+    const surface = "boundary";
+    const prefix = `train(${surface}): 1 fixes — `;
+    const refs = [`${"x".repeat(255 - prefix.length)}x`];
+    const unrestricted = `train(${surface}): ${refs.length} fixes — ${refs.join(", ")}`;
+
+    expect(unrestricted.length).toBe(256);
+    const title = trainTitle(surface, refs);
+    expect(title.length).toBeLessThanOrEqual(255);
+    const suffix = /\+(\d+) more$/.exec(title);
+    expect(suffix).not.toBeNull();
+    expect(Number(suffix![1])).toBeGreaterThanOrEqual(1);
+  });
   test("sections, titles, bodies, tables, and CI round-trip", () => {
     expect(parseSection("---\nverdict: yes\ntry: click\n---\nBody\n")).toEqual({
       meta: { verdict: "yes", try: "click" },
@@ -488,6 +679,26 @@ describe("pure helpers", () => {
         "**Merge with Rebase and merge.** Each fix is one or more commits whose subject starts with its ref, so any single fix can be reverted on its own.\n\n",
       ),
     ).toBe(true);
+    expect(body).toBe(
+      [
+        "**Merge with Rebase and merge.** Each fix is one or more commits whose subject starts with its ref, so any single fix can be reverted on its own.",
+        "",
+        "| fix | ref | files | lines ± | verifier | how to try |",
+        "| --- | --- | ---: | ---: | --- | --- |",
+        "| A \\| B | T1 | 2 | +3 −1 | ok \\| yes | click |",
+        "",
+        "## T1 · A | B",
+        "",
+        "Proof",
+        "",
+        "## unattributed",
+        "",
+        "Commits without a leading task ref:",
+        "",
+        "- loose",
+        "",
+      ].join("\n"),
+    );
     expect(parseBodySections(body).get("T1")).toEqual({
       title: "A | B",
       body: "Proof\n\n## unattributed\n\nCommits without a leading task ref:\n\n- loose",
@@ -502,6 +713,36 @@ describe("pure helpers", () => {
       ]),
     ).toBe("1✓ 1✗ 1… 1↷");
     expect(ciSummary([])).toBe("none");
+  });
+  test("duplicate ref headings are stripped and round-trip cleanly", () => {
+    const render = (body: string) =>
+      renderBody(
+        [
+          {
+            ref: "T167",
+            title: "Keep one heading",
+            files: 1,
+            added: 2,
+            deleted: 0,
+            verdict: "ok",
+            try: "read",
+            body,
+          },
+        ],
+        [],
+      );
+    const expected = render("Proof");
+    const bare = render("## T167\n\nProof");
+    const titled = render("## T167 · Keep one heading\n\nProof");
+
+    expect(bare).toBe(expected);
+    expect(titled).toBe(expected);
+    for (const body of [bare, titled]) {
+      expect(body.match(/^## T167\b/gm)).toHaveLength(1);
+      expect(body).toContain("## T167 · Keep one heading\n\nProof");
+      expect(parseBodySections(body).get("T167")?.body).toBe("Proof");
+      expect(parseBodySections(body).get("T167")?.body).not.toMatch(/^## T167\b/);
+    }
   });
   test("real-shaped body tables and notes round-trip", () => {
     const notes = [
@@ -1268,7 +1509,9 @@ process.exit(child.exitCode);
   );
   expect(tasks["first-fix"].status).toBe("shipped");
   expect(tasks["first-fix"].stages).toEqual(stagesBefore);
-  expect(readFileSync(w.board, "utf8")).toBe(boardBefore);
+  // The only board change is the train card, the one card for this MR.
+  const added = readFileSync(w.board, "utf8").split("\n").filter((line) => !boardBefore.includes(line));
+  expect(added).toEqual([expect.stringContaining("[[cards/train-sidebar|details]]")]);
   expect(readFileSync(join(dirname(w.board), "cards/first-fix.md"), "utf8")).toContain(
     `**MR** ${pr.url}`,
   );
@@ -1422,6 +1665,62 @@ test("cases 4 and 9: append edits one PR, then drop surgically removes one fix",
   expect(board.split("## Need Attention")[1].split("\n## ")[0]).toContain("cards/first-fix|");
 });
 
+test("an already-pushed ref finalizes on a verified retry without a second push", () => {
+  const w = world();
+  const one = owner(w, "first-fix", "T1", "one.txt");
+  expect(first(w, one, "T1").code).toBe(3);
+  git(one.path, "push", "origin", "HEAD:refs/heads/train/sidebar");
+  git(w.shared, "fetch", "origin");
+  const before = git(w.shared, "rev-parse", "origin/train/sidebar");
+
+  const shipped = finish(w, one, "T1");
+  expect(shipped.code, shipped.err + shipped.out).toBe(0);
+  expect(shipped.out).toContain("commits are already ancestors of train/sidebar");
+  git(w.shared, "fetch", "origin");
+  expect(git(w.shared, "rev-parse", "origin/train/sidebar")).toBe(before);
+  const tasks = JSON.parse(readFileSync(w.tasks, "utf8"));
+  expect(tasks["first-fix"].mrUrl).toBe("https://github.com/acme/chat/pull/1");
+  expect(tasks["first-fix"].train).toBe("sidebar");
+  const state = JSON.parse(readFileSync(w.ghState, "utf8"));
+  expect(state.prs[0].title).toBe("train(sidebar): 1 fixes — T1");
+  expect(state.prs[0].body).toContain("## T1 · First fix");
+  expect(existsSync(join(w.home, "trains/sidebar/T1.pending.json"))).toBe(false);
+});
+
+test("an already-pushed ref finalizes on the first call without a second push", () => {
+  const w = world();
+  const one = owner(w, "first-fix", "T1", "one.txt");
+  expect(first(w, one, "T1").code).toBe(3);
+  git(one.path, "push", "origin", "HEAD:refs/heads/train/sidebar");
+  rmSync(join(w.home, "trains/sidebar/T1.pending.json"), { force: true });
+  git(w.shared, "fetch", "origin");
+  const before = git(w.shared, "rev-parse", "origin/train/sidebar");
+
+  const shipped = first(w, one, "T1");
+  expect(shipped.code, shipped.err + shipped.out).toBe(0);
+  expect(shipped.out).toContain("commits are already ancestors of train/sidebar");
+  git(w.shared, "fetch", "origin");
+  expect(git(w.shared, "rev-parse", "origin/train/sidebar")).toBe(before);
+  const tasks = JSON.parse(readFileSync(w.tasks, "utf8"));
+  expect(tasks["first-fix"].mrUrl).toBe("https://github.com/acme/chat/pull/1");
+  expect(tasks["first-fix"].train).toBe("sidebar");
+  const state = JSON.parse(readFileSync(w.ghState, "utf8"));
+  expect(state.prs[0].title).toBe("train(sidebar): 1 fixes — T1");
+  expect(state.prs[0].body).toContain("## T1 · First fix");
+  expect(existsSync(join(w.home, "trains/sidebar/T1.pending.json"))).toBe(false);
+});
+
+test("a fully shipped branch still refuses when there is nothing new to ship", () => {
+  const w = world();
+  const one = owner(w, "first-fix", "T1", "one.txt");
+  expect(first(w, one, "T1").code).toBe(3);
+  expect(finish(w, one, "T1").code).toBe(0);
+
+  const repeated = first(w, one, "T1");
+  expect(repeated.code).not.toBe(0);
+  expect(repeated.err).toContain("nothing new to ship");
+});
+
 test("case 5a: a disjoint train move is adopted without a second verification", () => {
   const w = world();
   const one = owner(w, "first-fix", "T1", "one.txt");
@@ -1436,6 +1735,34 @@ test("case 5a: a disjoint train move is adopted without a second verification", 
   expect(
     git(w.shared, "log", "--reverse", "--format=%s", "origin/main..origin/train/sidebar"),
   ).toBe("T2 fix second-fix\nT1 fix first-fix");
+});
+
+test("case 5c: movePendingBase skips an empty cherry-pick in a multi-commit ref", () => {
+  const w = world();
+  const one = owner(w, "first-fix", "T1", "one.txt");
+  writeFileSync(join(one.path, "identical.txt"), "same content\n");
+  git(one.path, "add", "identical.txt");
+  git(one.path, "commit", "-m", "add identical content");
+  writeFileSync(join(one.path, "after.txt"), "after collision\n");
+  git(one.path, "add", "after.txt");
+  git(one.path, "commit", "-m", "add trailing content");
+  expect(first(w, one, "T1").code).toBe(3);
+
+  const two = owner(w, "second-fix", "T2", "two.txt");
+  writeFileSync(join(two.path, "identical.txt"), "same content\n");
+  git(two.path, "add", "identical.txt");
+  git(two.path, "commit", "-m", "add identical content");
+  expect(first(w, two, "T2").code).toBe(3);
+  expect(finish(w, two, "T2").code).toBe(0);
+
+  const moved = finish(w, one, "T1");
+  expect(moved.code, moved.err + moved.out).toBe(3);
+  expect(moved.code).not.toBe(4);
+  expect(moved.out).toContain("identical.txt");
+  const subjects = git(one.path, "log", "--reverse", "--format=%s", "origin/main..HEAD");
+  expect(subjects).toContain("T1 fix first-fix");
+  expect(subjects).toContain("T1 add trailing content");
+  expect(subjects).not.toContain("T1 add identical content");
 });
 
 test("case 5b: an overlapping clean train move requires reverification", () => {
@@ -1601,9 +1928,14 @@ test("case 11: landed moves every known ref once", () => {
   expect(landed.code).toBe(0);
   expect(landed.out).toContain("T1 → Done");
   expect(landed.out).toContain("T2 → Done");
-  const done = readFileSync(w.board, "utf8").split("## Done")[1];
-  expect(done).toContain("cards/first-fix|");
-  expect(done).toContain("cards/second-fix|");
+  // Landed members fold into the train card rather than each taking a Done
+  // line: an MR is on exactly one card.
+  const boardText = readFileSync(w.board, "utf8");
+  expect(boardText).not.toContain("cards/first-fix|");
+  expect(boardText).not.toContain("cards/second-fix|");
+  expect(boardText).toContain("cards/train-sidebar|");
+  const landedTasks = JSON.parse(readFileSync(w.tasks, "utf8"));
+  expect(landedTasks["first-fix"].trainLine).toContain("cards/first-fix|");
   expect(JSON.parse(readFileSync(w.tasks, "utf8"))["first-fix"].status).toBe("shipped");
   const again = runTrain(w, ["landed"]);
   expect(again.code).toBe(0);
@@ -1767,4 +2099,286 @@ test("case 15: another ref in the range and tracked dirt both refuse", () => {
   r = first(w, o, "T1");
   expect(r.code).toBe(1);
   expect(r.err).toContain("dirty tracked worktree");
+});
+
+describe("T309 GitLab forge verification", () => {
+  const glState = (w: World) => JSON.parse(readFileSync(w.glabState, "utf8"));
+  const ghState = (w: World) => JSON.parse(readFileSync(w.ghState, "utf8"));
+  const writes = (state: any) => state.calls.filter((c: any) => c.argv.includes("-X"));
+
+  test("V1 GitLab ship creates one MR, no GitHub PR, and records the GitLab train", () => {
+    const w = forgeWorld("gitlab"), o = owner(w, "first-fix", "T1", "one.txt");
+    expect(first(w, o, "T1").code).toBe(3);
+    const shipped = finish(w, o, "T1");
+    expect(shipped.code, shipped.err + shipped.out).toBe(0);
+    const state = glState(w);
+    const posts = writes(state).filter((c: any) => c.argv.includes("POST") &&
+      c.argv.some((x: string) => x === "projects/acme%2Fchat/merge_requests"));
+    expect(posts).toHaveLength(1);
+    expect(posts[0].input).toMatchObject({ source_branch: "train/sidebar", target_branch: "main", squash: false,
+      title: "train(sidebar): 1 fixes — T1" });
+    expect(posts[0].input.description.startsWith("**Merge as a fast-forward — press Rebase first if GitLab asks, and never squash.**")).toBe(true);
+    expect(ghState(w).calls ?? []).toHaveLength(0);
+    expect(JSON.parse(readFileSync(w.tasks, "utf8"))["first-fix"].mrUrl)
+      .toBe("https://gitlab.com/acme/chat/-/merge_requests/1");
+    expect(JSON.parse(readFileSync(join(w.home, "trains/sidebar/train.json"), "utf8")).repo).toBe("acme/chat");
+    const review = readFileSync(w.board, "utf8").split("## Review\n")[1]!.split("## Done")[0]!;
+    expect(review).toContain("cards/train-sidebar");
+  });
+
+  test("V2 second GitLab ship edits the existing MR with both sections", () => {
+    const w = forgeWorld("gitlab"), one = owner(w, "first-fix", "T1", "one.txt");
+    first(w, one, "T1"); finish(w, one, "T1");
+    const two = owner(w, "second-fix", "T2", "two.txt");
+    first(w, two, "T2");
+    const shipped = finish(w, two, "T2");
+    expect(shipped.code, shipped.err + shipped.out).toBe(0);
+    const state = glState(w);
+    const creates = writes(state).filter((c: any) => c.argv.includes("POST") &&
+      c.argv.some((x: string) => x === "projects/acme%2Fchat/merge_requests"));
+    const edits = writes(state).filter((c: any) => c.argv.includes("PUT") &&
+      c.argv.some((x: string) => x.endsWith("/merge_requests/1")));
+    expect(creates).toHaveLength(1);
+    expect(edits.at(-1).input.title).toBe("train(sidebar): 2 fixes — T1, T2");
+    expect(edits.at(-1).input.description).toContain("## T1 · First fix");
+    expect(edits.at(-1).input.description).toContain("## T2 · Second fix");
+  });
+
+  test("V3 GitHub PR calls use the raw origin repo, never gh repo view's answer", () => {
+    const w = forgeWorld("github", "wrong/repo"), o = owner(w, "first-fix", "T1", "one.txt");
+    first(w, o, "T1");
+    const shipped = finish(w, o, "T1");
+    expect(shipped.code, shipped.err + shipped.out).toBe(0);
+    const calls: string[][] = ghState(w).calls;
+    expect(calls.some((a) => a[0] === "repo" && a[1] === "view")).toBe(false);
+    for (const a of calls.filter((x) => x[0] === "pr"))
+      expect(a.slice(a.indexOf("--repo"), a.indexOf("--repo") + 2)).toEqual(["--repo", "acme/chat"]);
+  });
+
+  test("V4 GitLab status maps conflicts, pipeline CI, refs, and unlanded labels", () => {
+    const w = forgeWorld("gitlab");
+    const state = glState(w);
+    state.mrs = [
+      { iid: 5, web_url: "https://gitlab.com/acme/chat/-/merge_requests/5", state: "opened",
+        title: "open", description: "", source_branch: "train/sidebar", sha: "abc",
+        created_at: "2026-09-14T22:48:00.000Z", has_conflicts: true,
+        detailed_merge_status: "conflict", head_pipeline: { status: "failed" }, commits: ["T1 fix"] },
+      { iid: 7, web_url: "https://gitlab.com/acme/chat/-/merge_requests/7", state: "merged",
+        title: "merged", description: "", source_branch: "train/sidebar", sha: "def",
+        created_at: "2026-09-14T20:00:00.000Z", has_conflicts: false,
+        detailed_merge_status: "mergeable", head_pipeline: null, commits: ["T1 fix"] },
+    ];
+    writeFileSync(w.glabState, JSON.stringify(state, null, 1));
+    const r = runTrain(w, ["status"]);
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("sidebar  !5  3h 12m  CONFLICTING/conflict  CI 1✗  T1");
+    expect(r.out).toContain("merged, not landed: sidebar !7");
+  });
+
+  test("V5 GitLab landed stores the MR URL and a legacy number does not suppress it", () => {
+    const w = forgeWorld("gitlab"), state = glState(w);
+    state.mrs = [{ iid: 7, web_url: "https://gitlab.com/acme/chat/-/merge_requests/7", state: "merged",
+      title: "merged", description: "", source_branch: "train/sidebar", sha: "def",
+      created_at: "2026-09-14T20:00:00.000Z", has_conflicts: false,
+      detailed_merge_status: "mergeable", head_pipeline: null, commits: ["T1 fix"] }];
+    writeFileSync(w.glabState, JSON.stringify(state, null, 1));
+    mkdirSync(join(w.home, "trains/sidebar"), { recursive: true });
+    writeFileSync(join(w.home, "trains/sidebar/landed.json"), "[7]\n");
+    const firstRun = runTrain(w, ["landed"]);
+    expect(firstRun.code, firstRun.err).toBe(0);
+    expect(firstRun.out).toContain("T1 → Done");
+    expect(JSON.parse(readFileSync(join(w.home, "trains/sidebar/landed.json"), "utf8")))
+      .toEqual([7, "https://gitlab.com/acme/chat/-/merge_requests/7"]);
+    expect(runTrain(w, ["landed"]).out).toBe("");
+  });
+
+  test("V6 GitLab drop edits a remaining train and closes an emptied train", () => {
+    const w = forgeWorld("gitlab"), one = owner(w, "first-fix", "T1", "one.txt");
+    first(w, one, "T1"); finish(w, one, "T1");
+    const two = owner(w, "second-fix", "T2", "two.txt");
+    first(w, two, "T2"); finish(w, two, "T2");
+    expect(runTrain(w, ["drop", "T2", "--surface", "sidebar"]).code).toBe(0);
+    let state = glState(w);
+    const edit = writes(state).filter((c: any) => c.argv.includes("PUT") && c.input.description).at(-1);
+    expect(edit.input.description).not.toContain("## T2");
+    expect(runTrain(w, ["drop", "T1", "--surface", "sidebar"]).code).toBe(0);
+    state = glState(w);
+    expect(writes(state).some((c: any) => c.argv.some((x: string) => x.endsWith("/notes")) &&
+      c.input.body === "Emptied by train.ts drop T1.")).toBe(true);
+    expect(writes(state).some((c: any) => c.input.state_event === "close")).toBe(true);
+  });
+
+  test("V7 ship holds stop both ship calls and drop before locks, fetches, or writes", () => {
+    const w = forgeWorld("gitlab"), o = owner(w, "first-fix", "T1", "one.txt");
+    writeFileSync(join(w.home, "train-holds.json"), JSON.stringify({ "gitlab.com/acme/chat": "sync pending" }));
+    mkdirSync(join(w.home, "trains/sidebar"), { recursive: true });
+    writeFileSync(join(w.home, "trains/sidebar/train.json"), JSON.stringify({
+      surface: "sidebar", repo: "acme/old-chat",
+      pr: { number: 99, url: "https://github.com/acme/old-chat/pull/99" },
+    }, null, 1));
+    const surfacesBefore = readFileSync(w.surfaces);
+    const firstCall = first(w, o, "T1");
+    expect(firstCall.code).toBe(75);
+    expect(firstCall.err).toContain("gitlab.com/acme/chat is on a ship hold: sync pending");
+    expect(firstCall.err).not.toContain("pick a key for this repo");
+    expect(existsSync(join(w.home, "trains/sidebar/T1.pending.json"))).toBe(false);
+    expect(command(["git", "--git-dir", w.origin, "show-ref", "--verify", "--quiet",
+      "refs/heads/train/sidebar"], w.root, commandEnv(gitEnv(w.root))).code).toBe(1);
+    const dropped = runTrain(w, ["drop", "T1", "--surface", "sidebar"]);
+    expect(dropped.code).toBe(75);
+    expect(dropped.err).toContain("gitlab.com/acme/chat is on a ship hold: sync pending");
+    expect(dropped.err).not.toContain("pick a key for this repo");
+    expect(readFileSync(w.surfaces).equals(surfacesBefore)).toBe(true);
+    expect(writes(glState(w))).toHaveLength(0);
+    expect(runTrain(w, ["status"]).code).toBe(0);
+
+    const second = forgeWorld("gitlab"), secondOwner = owner(second, "first-fix", "T1", "one.txt");
+    expect(first(second, secondOwner, "T1").code).toBe(3);
+    writeFileSync(join(second.home, "train-holds.json"),
+      JSON.stringify({ "gitlab.com/acme/chat": "sync pending" }));
+    const verified = finish(second, secondOwner, "T1");
+    expect(verified.code).toBe(75);
+    expect(command(["git", "--git-dir", second.origin, "show-ref", "--verify", "--quiet",
+      "refs/heads/train/sidebar"], second.root, commandEnv(gitEnv(second.root))).code).toBe(1);
+    expect(writes(glState(second))).toHaveLength(0);
+  });
+
+  test("V8 move dry-runs, rebuilds, adopts, rejects duplicate moves, and cleans conflicts", () => {
+    const created = migrationWorld();
+    const beforeTasks = readFileSync(created.w.tasks);
+    const beforeRefs = git(created.w.root, "--git-dir", created.w.origin, "show-ref");
+    const dry = runTrain(created.w, ["move", "sidebar", "--dry-run"]);
+    expect(dry.code, dry.err).toBe(0);
+    expect(dry.out).toContain("destination: create");
+    expect(dry.out).toContain("history: rebuild");
+    expect(readFileSync(created.w.tasks).equals(beforeTasks)).toBe(true);
+    expect(git(created.w.root, "--git-dir", created.w.origin, "show-ref")).toBe(beforeRefs);
+    expect(writes(glState(created.w))).toHaveLength(0);
+
+    const moved = runTrain(created.w, ["move", "sidebar"], created.w.shared,
+      commandEnv({ ...created.w.env, GH_STUB_TASKS: created.w.tasks }));
+    expect(moved.code, moved.err + moved.out).toBe(0);
+    expect(moved.out).toContain("moved #9 → !1");
+    expect(git(created.w.root, "--git-dir", created.w.origin, "rev-parse",
+      `refs/heads/train-stale/sidebar-${created.stale.slice(0, 8)}`)).toBe(created.stale);
+    const log = git(created.w.root, "--git-dir", created.w.origin, "log", "--format=%s%n%b",
+      "refs/heads/main..refs/heads/train/sidebar");
+    expect(log).toContain("T1 first migration fix");
+    expect(log).toContain("cherry picked from commit");
+    const createdGl = glState(created.w);
+    const create = writes(createdGl).find((c: any) => c.argv.includes("POST") &&
+      c.argv.some((x: string) => x === "projects/acme%2Fchat/merge_requests"));
+    expect(create.input.title).toBe("train(sidebar): 2 fixes — T1, T2");
+    expect(create.input.description).toBe("Moved from GitHub: https://github.com/acme/chat/pull/9\n\nSource body byte-for-byte.\n");
+    expect(ghState(created.w).prs[0].state).toBe("CLOSED");
+    expect(ghState(created.w).calls).toContainEqual(["pr", "close", "9", "--repo", "acme/chat",
+      "--comment", "Moved to GitLab: https://gitlab.com/acme/chat/-/merge_requests/1"]);
+    const ledger = JSON.parse(readFileSync(join(created.w.home, "trains/sidebar/train.json"), "utf8"));
+    expect(ledger).toMatchObject({ repo: "acme/chat", pr: { number: 1 },
+      movedFrom: { repo: "acme/chat", number: 9 } });
+    expect(JSON.parse(readFileSync(created.w.tasks, "utf8"))["first-fix"].mrUrl)
+      .toBe("https://gitlab.com/acme/chat/-/merge_requests/1");
+    expect(JSON.parse(readFileSync(created.w.tasks, "utf8"))["second-fix"].mrUrl)
+      .toBe("https://gitlab.com/acme/chat/-/merge_requests/1");
+    expect(JSON.parse(readFileSync(created.w.tasks, "utf8"))["second-fix"].otherOwnerWrite)
+      .toBe("survives");
+
+    const adopted = migrationWorld();
+    const reorderedTip = pushDestinationTrain(adopted.w, ["T2", "T1"]);
+    const adoptRefsBefore = git(adopted.w.root, "--git-dir", adopted.w.origin, "show-ref");
+    const adoptState = glState(adopted.w);
+    adoptState.mrs = [{ iid: 3, web_url: "https://gitlab.com/acme/chat/-/merge_requests/3", state: "opened",
+      title: "adopt", description: "Moved from GitHub: https://github.com/acme/chat/pull/9",
+      source_branch: "train/sidebar", sha: reorderedTip,
+      created_at: "2026-09-15T01:00:00.000Z", has_conflicts: false,
+      detailed_merge_status: "mergeable", head_pipeline: null,
+      commits: ["T2 destination fix 0", "T1 destination fix 1"] }];
+    writeFileSync(adopted.w.glabState, JSON.stringify(adoptState, null, 1));
+    const adoptedRun = runTrain(adopted.w, ["move", "sidebar"]);
+    expect(adoptedRun.code, adoptedRun.err + adoptedRun.out).toBe(0);
+    expect(adoptedRun.out).toContain("→ !3");
+    expect(git(adopted.w.root, "--git-dir", adopted.w.origin, "show-ref")).toBe(adoptRefsBefore);
+    expect(writes(glState(adopted.w)).some((c: any) =>
+      c.argv.some((x: string) => x === "projects/acme%2Fchat/merge_requests"))).toBe(false);
+    expect(ghState(adopted.w).prs[0].state).toBe("CLOSED");
+
+    const extra = migrationWorld();
+    const extraTip = pushDestinationTrain(extra.w, ["T2", "T1", "T3"]);
+    const extraState = glState(extra.w);
+    extraState.mrs = [{ iid: 5, web_url: "https://gitlab.com/acme/chat/-/merge_requests/5", state: "opened",
+      title: "extra", description: "Moved from GitHub: https://github.com/acme/chat/pull/9",
+      source_branch: "train/sidebar", sha: extraTip,
+      created_at: "2026-09-15T01:00:00.000Z", has_conflicts: false,
+      detailed_merge_status: "mergeable", head_pipeline: null,
+      commits: ["T2 destination fix 0", "T1 destination fix 1", "T3 destination fix 2"] }];
+    writeFileSync(extra.w.glabState, JSON.stringify(extraState, null, 1));
+    const extraTasks = readFileSync(extra.w.tasks);
+    const extraRefs = git(extra.w.root, "--git-dir", extra.w.origin, "show-ref");
+    const extraRun = runTrain(extra.w, ["move", "sidebar"]);
+    expect(extraRun.code).toBe(1);
+    expect(extraRun.err).toContain("refs T2, T1, T3 do not match GitHub refs T1, T2");
+    expect(readFileSync(extra.w.tasks).equals(extraTasks)).toBe(true);
+    expect(git(extra.w.root, "--git-dir", extra.w.origin, "show-ref")).toBe(extraRefs);
+    expect(writes(glState(extra.w)).some((c: any) => c.argv.includes("-X"))).toBe(false);
+    expect(ghState(extra.w).prs[0].state).toBe("OPEN");
+
+    const duplicate = migrationWorld();
+    const duplicateState = glState(duplicate.w);
+    duplicateState.mrs = [{ iid: 4, web_url: "https://gitlab.com/acme/chat/-/merge_requests/4", state: "opened",
+      title: "wrong branch", description: "https://github.com/acme/chat/pull/9",
+      source_branch: "gl/train/sidebar", sha: "x", created_at: "2026-09-15T01:00:00.000Z",
+      has_conflicts: false, detailed_merge_status: "mergeable", head_pipeline: null, commits: [] }];
+    writeFileSync(duplicate.w.glabState, JSON.stringify(duplicateState, null, 1));
+    const duplicateTasks = readFileSync(duplicate.w.tasks);
+    const duplicateRefs = git(duplicate.w.root, "--git-dir", duplicate.w.origin, "show-ref");
+    const refused = runTrain(duplicate.w, ["move", "sidebar"]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("!4 (gl/train/sidebar)");
+    expect(readFileSync(duplicate.w.tasks).equals(duplicateTasks)).toBe(true);
+    expect(git(duplicate.w.root, "--git-dir", duplicate.w.origin, "show-ref")).toBe(duplicateRefs);
+    expect(writes(glState(duplicate.w))).toHaveLength(0);
+    expect(ghState(duplicate.w).prs[0].state).toBe("OPEN");
+
+    const conflict = migrationWorld(true);
+    const conflictRefs = git(conflict.w.root, "--git-dir", conflict.w.origin, "show-ref");
+    const worktrees = git(conflict.w.shared, "worktree", "list", "--porcelain");
+    const conflicted = runTrain(conflict.w, ["move", "sidebar"]);
+    expect(conflicted.code).toBe(4);
+    expect(conflicted.err).toContain("move conflict in: common.txt");
+    expect(git(conflict.w.root, "--git-dir", conflict.w.origin, "show-ref")).toBe(conflictRefs);
+    expect(git(conflict.w.shared, "worktree", "list", "--porcelain")).toBe(worktrees);
+    expect(writes(glState(conflict.w))).toHaveLength(0);
+  });
+
+  test("V9 GitLab regeneration preserves a migration preamble verbatim", () => {
+    const w = forgeWorld("gitlab"), one = owner(w, "first-fix", "T1", "one.txt");
+    first(w, one, "T1"); finish(w, one, "T1");
+    const state = glState(w);
+    const preamble = "Ported from GitHub: X\n\nCommits replayed…\n\n---";
+    state.mrs[0].description = `${preamble}\n\n${state.mrs[0].description}`;
+    writeFileSync(w.glabState, JSON.stringify(state, null, 1));
+    const two = owner(w, "second-fix", "T2", "two.txt");
+    first(w, two, "T2"); finish(w, two, "T2");
+    expect(glState(w).mrs[0].description.startsWith(`${preamble}\n\n**Merge `)).toBe(true);
+  });
+
+  test("V10 GitLab render line differs while the default stays the GitHub contract", () => {
+    const row = [{ ref: "T1", title: "One", files: 1, added: 1, deleted: 0,
+      verdict: "ok", try: "open", body: "proof" }];
+    expect(renderBody(row, [], "", { forge: "gitlab" })).toStartWith("**Merge as a fast-forward");
+    expect(renderBody(row, [])).toStartWith("**Merge with Rebase and merge.**");
+    expect(parseBodyPreamble("Moved from GitHub: X\n\n**Merge now**")).toBe("Moved from GitHub: X");
+  });
+
+  test("V12 remote parsing and GitLab CI normalization cover every contract class", () => {
+    expect(parseRemoteUrl("https://gitlab.com/g/n.git")).toEqual({ host: "gitlab.com", path: "g/n" });
+    expect(parseRemoteUrl("https://gitlab.com/g/n")).toEqual({ host: "gitlab.com", path: "g/n" });
+    expect(parseRemoteUrl("git@gitlab.com:g/sub/n.git")).toEqual({ host: "gitlab.com", path: "g/sub/n" });
+    expect(parseRemoteUrl("ssh://git@gitlab.com/g/n.git")).toEqual({ host: "gitlab.com", path: "g/n" });
+    expect(parseRemoteUrl("/tmp/repo.git")).toBeNull();
+    expect([null, "success", "failed", "canceled", "skipped", "running"].map((status) =>
+      gitlabCiSummary(status === null ? null : { status }))).toEqual(["none", "1✓", "1✗", "1✗", "1↷", "1…"]);
+    const w = forgeWorld("gitlab");
+    expect(resolveForge(w.shared)).toMatchObject({ kind: "gitlab", host: "gitlab.com", repo: "acme/chat" });
+  });
 });

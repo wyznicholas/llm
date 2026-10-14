@@ -1,0 +1,180 @@
+#!/bin/bash
+# Weekly kanban rotation + retro, run headless by launchd at 23:30 Sunday.
+#
+# Automates the Monday ritual written down in kanban/Kanban Rotation.md, which
+# had not survived its second Monday: on 2026-09-14 the live board still read
+# `week: 37` and archive/ held only week 36.
+#
+# Usage: om-kanban-rotate [--dry-run] [--no-retro]
+#   --dry-run   report what would happen, write nothing
+#   --no-retro  rotate the board but skip the claude call
+#
+# Design notes, each forced by something measured on this host:
+#
+#  1. IT RUNS SUNDAY 23:30, NOT MONDAY 00:00. com.nicholas.midnight-scout fires
+#     at exactly Hour 0 / Minute 0 on Weekdays 1-6 and spends up to 8 hours
+#     filing cards into `todo` on this same Kanban.md. launchd gives no
+#     ordering guarantee between two agents, so a Monday-00:00 rotation is a
+#     concurrent read-modify-write on one file: a card filed between the
+#     rotation's read and its write is lost outright. Separating them in
+#     wall-clock time is the only coordination primitive available without
+#     adding a lockfile. The 30 minutes also means the scout's Monday cards
+#     land on the fresh board instead of inside the archived week.
+#
+#  2. THIS SCRIPT NEVER READS THE VAULT ITSELF. ~/Documents is TCC-protected
+#     and the grant is per-binary. Measured under launchd on 2026-09-14:
+#     /opt/homebrew/bin/python3 and node can read it; /bin/cat, /usr/bin/python3
+#     and /bin/ls are DENIED -- including directory listing. Creating a NEW
+#     file is permitted for all of them, and that is the trap: a driver that
+#     reads the board with sed/cat gets nothing and can still write, so it
+#     clobbers the board with an empty file. Every vault read therefore goes
+#     through om-kanban-rotate-lib.py, run by an interpreter this script has
+#     PROVEN can read the board (see the preflight loop below). If no such
+#     interpreter exists the run aborts rather than degrading.
+#
+#  3. IDEMPOTENCY IS KEYED ON THE ARCHIVE FILE, not on the week number. At
+#     23:30 Sunday `date +%V` still returns the week being closed, so a
+#     "board week == current week" guard would skip every single run. If
+#     archive/Kanban <n>.md exists the week is already rotated -- which also
+#     makes a launchd wake-from-sleep replay harmless.
+#
+#  4. THE LIVE BOARD KEEPS ITS NAME. kanban.ts hardcodes DEFAULT_BOARD to this
+#     absolute path with no env override; rename it and every om-bug-loop write
+#     silently recreates an empty Kanban.md, splitting the week across two files.
+#
+#  5. `backlog` is stripped from the SNAPSHOT and never from the live board.
+#     It is the one column with no week.
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+VAULT="$HOME/Documents/Obisidian"
+KANBAN="$VAULT/kanban"
+BOARD="$KANBAN/Kanban.md"
+ARCHIVE="$KANBAN/archive"
+TEMPLATE="$KANBAN/Templates/Retro Template.md"
+TASKS="$HOME/.claude/om-bug-loop/tasks.json"
+LIB="$HOME/.local/bin/om-kanban-rotate-lib.py"
+
+BASE="$HOME/.claude/kanban-rotate"
+LOGS="$BASE/logs"
+PAUSE_FILE="$BASE/.paused"
+PROMPT="$BASE/PROMPT.md"
+mkdir -p "$LOGS"
+
+TODAY=$(date +%Y-%m-%d)
+ERRLOG="$LOGS/$TODAY.err"
+
+DRY=0; NO_RETRO=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run)  DRY=1 ;;
+    --no-retro) NO_RETRO=1 ;;
+    *) echo "unknown flag $a" >&2; exit 2 ;;
+  esac
+done
+
+say() { echo "[$(date +%H:%M:%S)] $*"; }
+
+# Kill switch: `touch ~/.claude/kanban-rotate/.paused`
+if [[ -f "$PAUSE_FILE" ]]; then
+  say "paused ($PAUSE_FILE exists) — skipping"; exit 0
+fi
+[[ -r "$LIB" && -r "$PROMPT" ]] || { echo "missing $LIB or $PROMPT" >&2; exit 1; }
+
+# --- pick an interpreter that can actually read the vault ---------------------
+# Order matters: Homebrew's python3 holds the Full Disk Access grant on this
+# host, Apple's does not. Each candidate is tried against the real files, so a
+# revoked grant or a moved brew prefix surfaces here as a clean abort instead of
+# as a half-rotated board at 23:30 on a Sunday.
+META=""
+for CAND in /opt/homebrew/bin/python3 "$(command -v python3 || true)" /usr/bin/python3; do
+  [[ -x "$CAND" ]] || continue
+  if META=$("$CAND" "$LIB" preflight "$BOARD" "$TEMPLATE" "$TASKS" "$ARCHIVE" 2>>"$ERRLOG"); then
+    PY="$CAND"; break
+  fi
+  META=""
+done
+if [[ -z "$META" ]]; then
+  echo "no interpreter can read $BOARD — this is a macOS Full Disk Access denial on ~/Documents, not a missing file." >&2
+  echo "Grant Full Disk Access to the python3 binary the job uses, then re-run. See $ERRLOG" >&2
+  exit 1
+fi
+say "interpreter: $PY"
+
+field() { "$PY" -c "import json,sys;print(json.loads(sys.argv[1])[sys.argv[2]])" "$META" "$1"; }
+OUT_WEEK=$(field out_week)
+OUT_WEEK_OF=$(field out_week_of)
+SNAP=$(field snapshot)
+RETRO=$(field retro)
+SNAP_EXISTS=$(field snapshot_exists)
+
+# --- which week is opening ----------------------------------------------------
+# The Monday that starts the week we rotate INTO, derived from a real date
+# rather than OUT_WEEK+1 so the 52/53 -> 1 rollover needs no special case and a
+# late or replayed run still lands on the right Monday.
+DOW=$(date +%u)                                  # 1=Mon .. 7=Sun
+if [[ "$DOW" -eq 7 ]]; then
+  NEW_WEEK_OF=$(date -v+1d +%Y-%m-%d)            # normal Sunday-night run
+else
+  NEW_WEEK_OF=$(date -v-$((DOW-1))d +%Y-%m-%d)   # replayed during the week
+fi
+NEW_WEEK=$(date -jf %Y-%m-%d "$NEW_WEEK_OF" +%V | sed 's/^0*//')
+CUR_WEEK=$(date +%V | sed 's/^0*//')
+
+say "closing week $OUT_WEEK (of $OUT_WEEK_OF) -> opening week $NEW_WEEK (of $NEW_WEEK_OF)"
+
+# The board's week: names the week it currently holds. If it has drifted, the
+# snapshot spans more than one week and the archive label undercounts it — say
+# so loudly rather than quietly mislabelling the permanent record.
+SPAN_NOTE=""
+if [[ "$OUT_WEEK" != "$CUR_WEEK" ]]; then
+  SPAN_NOTE="This board was never rotated at the end of week $OUT_WEEK, so the snapshot spans weeks $OUT_WEEK..$CUR_WEEK, not week $OUT_WEEK alone. Say so in the retro: the board counts cover the whole span, while the per-task timings are filtered to week $OUT_WEEK only."
+  say "WARNING: board says week $OUT_WEEK but it is now week $CUR_WEEK — snapshot spans $OUT_WEEK..$CUR_WEEK"
+fi
+
+if [[ "$SNAP_EXISTS" == "True" ]]; then
+  say "already rotated — $SNAP exists. Nothing to do."; exit 0
+fi
+
+if [[ "$DRY" -eq 1 ]]; then
+  say "DRY RUN — would write:"
+  say "  $SNAP"
+  say "  $RETRO"
+  say "  $BOARD  (Done + Withdrawn emptied, week: $NEW_WEEK, week-of: $NEW_WEEK_OF)"
+  [[ -n "$SPAN_NOTE" ]] && say "  note: $SPAN_NOTE"
+  exit 0
+fi
+
+# --- 1-3. the deterministic half ----------------------------------------------
+"$PY" "$LIB" backup "$BOARD" "$LOGS/$TODAY.board.bak" >/dev/null 2>>"$ERRLOG"
+say "board backed up to $LOGS/$TODAY.board.bak"
+"$PY" "$LIB" rotate "$BOARD" "$ARCHIVE" "$OUT_WEEK" "$NEW_WEEK" "$NEW_WEEK_OF" 2>>"$ERRLOG"
+say "rotated — snapshot at $SNAP"
+
+[[ "$NO_RETRO" -eq 1 ]] && { say "--no-retro — stopping before the retro"; exit 0; }
+
+# --- 4. the retro -------------------------------------------------------------
+MANIFEST="$LOGS/$TODAY.manifest.txt"
+FULLPROMPT="$LOGS/$TODAY.prompt.txt"
+"$PY" "$LIB" manifest "$SNAP" "$ARCHIVE" "$TASKS" "$OUT_WEEK" "$OUT_WEEK_OF" > "$MANIFEST" 2>>"$ERRLOG"
+say "manifest built ($(wc -l < "$MANIFEST" | tr -d ' ') lines)"
+
+# The template lives in the vault, so bash cannot cat it — the helper assembles
+# the whole prompt into $LOGS (under ~/.claude, which is not TCC-protected).
+# Inlining template and manifest also means the claude call needs no tools at
+# all: om-daily-update found that a prompt depending on a Read call produced a
+# silent empty draft when that read failed.
+"$PY" "$LIB" buildprompt "$PROMPT" "$TEMPLATE" "$MANIFEST" "$FULLPROMPT" \
+    "$OUT_WEEK" "$OUT_WEEK_OF" "$NEW_WEEK" "$NEW_WEEK_OF" "$SPAN_NOTE" >/dev/null 2>>"$ERRLOG"
+
+if ! claude -p "$(cat "$FULLPROMPT")" --model claude-opus-5 \
+    > "$LOGS/$TODAY.retro.tmp" 2>>"$ERRLOG" </dev/null; then
+  echo "claude failed to write the retro — the board IS rotated, see $ERRLOG" >&2
+  exit 1
+fi
+
+# Strip a wrapping code fence if the model added one despite the prompt, and
+# trim leading blank lines. A stray ``` would render in Obsidian.
+sed -e '/^```$/d' "$LOGS/$TODAY.retro.tmp" | awk 'NF {p=1} p' > "$RETRO"
+say "retro written to $RETRO"
+say "done — board is now week $NEW_WEEK"
