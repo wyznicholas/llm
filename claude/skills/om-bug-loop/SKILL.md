@@ -98,7 +98,7 @@ Crash-safe by construction: a fresh coordinator resumes entirely from this file.
 
 - **`stages` is the single source of truth for timing**, append-only, and `kanban.ts` maintains it. Never hand-edit it.
 - **`tasks.json` has no locking.** Every write is read-modify-write of the file on disk, preserving unknown keys, then tmp+rename — never a write of a copy you loaded earlier.
-- **Every scratch path is namespaced by task ref.** Concurrent owners share one parent scratchpad and a generic filename corrupts silently, with no error. Both halves have bitten: T7 and T8 collided on a "disposable" `:31999` daemon port and one killed the other's; a concurrent session overwrote T4's note source and clobbered its card body. Every agent derives its port, its `OM_HOME` and every scratch filename from its ref (`:319<NN>`, `om-home-T<NN>`, `note-T<NN>.md`), and never kills a process on a port it did not start.
+- **Every scratch path is namespaced by task ref.** Concurrent owners share one parent scratchpad and a generic filename corrupts silently, with no error. Both halves have bitten: T7 and T8 collided on a "disposable" `:31999` daemon port and one killed the other's; a concurrent session overwrote T4's note source and clobbered its card body. Every agent derives its port, its `OM_HOME` and every scratch filename — PID files included — from its ref (`:319<NN>`, `om-home-T<NN>`, `note-T<NN>.md`, `daemon-T<NN>-319<NN>.pid`), and never kills a process on a port it did not start.
 
 ## 2. Intake and dispatch
 
@@ -416,7 +416,7 @@ ever batch-steered, and nothing is parked or released without a named slug.
 
 ### The board is shared
 
-Kanban.md carries cards from more than one pipeline. **`T<n>` and `R<n>` are the only namespaces you own.** `C<n>` is another pipeline's — never dispatch, move, stamp or note those, and never count them as live or as drift. → `$REF/kanban-tool.md`
+Kanban.md carries cards from more than one pipeline. **`T<n>` and `R<n>` are the only namespaces you own.** `C<n>` is another pipeline's — never dispatch, move, stamp or note those, and never count them as live or as drift. **Raw `#web-port` lines are web-port-scout's** (Nicholas, 2026-10-08: it ports its own cards): never consume, dispatch or move them, even though they sit unclaimed in `todo`. → `$REF/kanban-tool.md`
 
 ## 7. Implement, then verify — and you do neither
 
@@ -483,6 +483,15 @@ are retired; see `$REF/train-surfaces.md`.
 merge decision, not the bug: **every open MR has exactly one card, and a card may
 list several MRs** — a cross-repo fix lists both. Never several cards for one MR.
 If there are 12 MRs there are at most 12 cards.
+
+**Enforced by the tool since 2026-09-28** (Nicholas found !101 on 3 cards plus 20
+loose lines; 26 trains were on more than one card). A train member in Review or
+Done **folds into its train card**: `reconcileMembership` parks its board line in
+`tasks.json` `trainLine` and removes it, and it never joins a category group.
+`upsert` to any other lane puts the exact line back. `train.ts` re-runs
+`traincard` after every ship, drop and landing. `traincard` leaves off a member's
+second MR when that MR is another train's own PR. So a lone per-fix line for a
+shipped fix in Review is a bug, not a card to review.
 
 A card is an **index** and nothing else: `MR:` lines, a generated `## Summary`
 with one line per task, and `## Open Questions`. The bug's problem statement,
@@ -568,8 +577,9 @@ card back out of Need Attention once unblocked.
   gate Nicholas did not ask for, and this pipeline already paid for one.
 - Push from the Codex stage — only the owner ships, through `train.ts ship`, and
   only after evidence and a re-run of its scoped tests on the rebased train tip.
-- Open a PR per task, or run `gh pr create` from any agent. Fixes ride their
-  surface's batch PR (`$REF/trains.md`).
+- Open a PR/MR per task, or run `gh pr create`, `glab mr create`, or a direct
+  forge call from any agent. Fixes ride their surface's GitHub PR or GitLab MR
+  train, selected from `origin` (`$REF/trains.md`).
 - Force-push a train, except through `train.ts drop`.
 - Cap open PRs or trains, or hold a verified fix back to keep a count down.
   Nicholas declined a cap (2026-09-15).

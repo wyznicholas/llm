@@ -1,0 +1,275 @@
+#!/bin/bash
+# Daily personal workflow review — run headless by launchd on nicholass-Mac-mini.
+# Reviews how Nicholas actually worked with BOTH Claude Code and Codex on this
+# machine since the last review, plus the machine's own housekeeping state.
+# Writes ~/.claude/workflow-reviews/YYYY-MM-DD.md and posts it to Discord.
+# Usage: claude-workflow-review [--force]   (--force regenerates today's report)
+#
+# This is NOT the om-agent fleet reviewer. That one lives on OMs-Mac-mini and
+# reads ombot's .state; this one never touches the other host. The subject here
+# is Nicholas's own two-assistant workflow on his own box.
+#
+# Three design notes, each forced by what this host actually holds:
+#
+#  1. Window = "since the last successful review", stored as epoch ms in
+#     $BASE/.review-cursor. Both Claude's history.jsonl and Codex's rollouts
+#     carry real absolute timestamps, so unlike the om-agent log there is no
+#     need to guess dates. A weekday-only schedule then gives Monday a 3-day
+#     window for free, with no special-casing.
+#
+#  2. Claude evidence comes from ~/.claude/history.jsonl (one line per prompt,
+#     with project + epoch-ms timestamp), NOT from walking ~/.claude/projects —
+#     that is 832 transcripts and 456 MB, and the prompt text is what a
+#     workflow review is actually about. Transcripts are consulted only for
+#     error counts and only for files touched in the window.
+#
+#  3. No network calls in the collector. `softwareupdate -l` can block for a
+#     minute or more on a bad network and would stall the whole run, so OS
+#     patch state is reported from what is already on disk (sw_vers + brew).
+#
+# The webhook URL lives in $BASE/.discord-webhook (chmod 600), not inline here:
+# it is a bearer credential — anyone holding it can post to the channel.
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+BASE="$HOME/.claude/workflow-reviews"
+LOGS="$BASE/logs"
+CLAUDE_HIST="$HOME/.claude/history.jsonl"
+CLAUDE_PROJECTS="$HOME/.claude/projects"
+CODEX_DIR="$HOME/.codex"
+CODEX_SESSIONS="$CODEX_DIR/sessions"
+CURSOR_FILE="$BASE/.review-cursor"
+mkdir -p "$LOGS"
+TODAY=$(date +%Y-%m-%d)
+REPORT="$BASE/$TODAY.md"
+HOST=$(hostname -s)
+
+if [[ -f "$REPORT" && "${1:-}" != "--force" ]]; then
+  exit 0
+fi
+
+# Reports run several KB, past Discord's 2000-char message cap, so the report
+# goes up as a multipart file attachment rather than as message text.
+# Never let a delivery failure kill the run: the report on disk is the source
+# of truth, Discord is only the transport.
+post_discord() {
+  local msg="$1" file="${2:-}"
+  local hook_file="$BASE/.discord-webhook" hook payload http
+
+  [[ -r "$hook_file" ]] || { echo "no webhook file at $hook_file" >&2; return 1; }
+  hook="$(tr -d '[:space:]' < "$hook_file")"
+  [[ -n "$hook" ]] || { echo "webhook file is empty" >&2; return 1; }
+
+  payload="{\"content\":$(printf '%s' "$msg" | jq -Rs .)}"
+
+  if [[ -n "$file" && -f "$file" ]]; then
+    http=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$hook" \
+      -F "payload_json=$payload" \
+      -F "file1=@$file;filename=$(basename "$file");type=text/markdown" \
+      --max-time 30 --retry 2 --retry-delay 5 2>>"$LOGS/$TODAY.err") || http=000
+  else
+    http=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$hook" \
+      -H 'Content-Type: application/json' -d "$payload" \
+      --max-time 30 --retry 2 --retry-delay 5 2>>"$LOGS/$TODAY.err") || http=000
+  fi
+
+  # Discord answers 200 with a body for multipart, 204 for a bare message.
+  case "$http" in
+    200|204) return 0 ;;
+    *) echo "discord post failed: HTTP $http" >&2; return 1 ;;
+  esac
+}
+
+# ------------------------------------------------------------------- window
+NOW_MS=$(( $(date +%s) * 1000 ))
+CURSOR_MS=0
+[[ -r "$CURSOR_FILE" ]] && CURSOR_MS=$(tr -dc '0-9' < "$CURSOR_FILE")
+[[ -n "$CURSOR_MS" ]] || CURSOR_MS=0
+# First ever run has no cursor: look back 24h rather than reviewing all of
+# history, so report #1 is comparable in size to every later one.
+if (( CURSOR_MS == 0 )); then
+  CURSOR_MS=$(( NOW_MS - 86400000 ))
+  WINDOW_NOTE="first run — no cursor, looked back 24h"
+else
+  WINDOW_NOTE="since last successful review"
+fi
+WINDOW_HOURS=$(( (NOW_MS - CURSOR_MS) / 3600000 ))
+# find(1) needs a whole-minute age, and rounds toward zero; +1 keeps the file
+# sweep from cutting off files written in the current partial minute.
+WINDOW_MINS=$(( (NOW_MS - CURSOR_MS) / 60000 + 1 ))
+CURSOR_ISO=$(date -r $(( CURSOR_MS / 1000 )) '+%Y-%m-%d %H:%M:%S %Z')
+
+# ---------------------------------------------------------------- manifest
+MANIFEST="$BASE/latest-manifest.txt"
+{
+  echo "Host: $HOST ($(scutil --get ComputerName 2>/dev/null || echo '?'))  user: $(whoami)"
+  echo "Generated: $(date '+%Y-%m-%d %H:%M %Z')"
+  echo "Review window: $CURSOR_ISO -> now (${WINDOW_HOURS}h, $WINDOW_NOTE)"
+  echo ""
+
+  # ------------------------------------------------------------ Claude Code
+  # Prompts come from the transcripts, NOT from history.jsonl. Measured on this
+  # host 2026-08-20: history.jsonl covers only 140 of 832 sessions and had not
+  # been written since the previous evening, because it records only prompts
+  # typed in the interactive CLI — desktop-app and programmatic sessions never
+  # appear. Treating it as the prompt source silently hid ~80% of the work.
+  echo "## Claude Code — sessions in window (transcripts are the source of truth)"
+  ALL_CLAUDE=$(find "$CLAUDE_PROJECTS" -name '*.jsonl' -mmin "-$WINDOW_MINS" -size +4k 2>/dev/null)
+  # Subagent and workflow transcripts are machine-authored: their "user" turns
+  # are task prompts Claude wrote for itself, so mixing them in makes it look
+  # like Nicholas asked for things he never typed. Counted, never quoted.
+  CLAUDE_FILES=$(printf '%s\n' "$ALL_CLAUDE" | grep -vE '/wf_[^/]*/|/agent-[^/]*\.jsonl$|/journal\.jsonl$' | head -60 || :)
+  SUB_N=$(printf '%s\n' "$ALL_CLAUDE" | grep -cE '/wf_[^/]*/|/agent-[^/]*\.jsonl$|/journal\.jsonl$' || :)
+  CLAUDE_N=$(printf '%s\n' "$CLAUDE_FILES" | grep -c . || :)
+  echo "his own sessions: $CLAUDE_N (capped at 60 — say so if this is exactly 60)"
+  echo "subagent/workflow transcripts (excluded from the prompts below): $SUB_N"
+  echo ""
+  if [[ -n "$CLAUDE_FILES" ]]; then
+    printf '%s\n' "$CLAUDE_FILES" | while read -r f; do
+      [[ -n "$f" ]] || continue
+      printf '— %s | %s | %s | errors=%s\n' \
+        "$(stat -f '%Sm' -t '%m-%d %H:%M' "$f")" \
+        "$(basename "$(dirname "$f")" | sed 's|^-Users-nicholas-||')" \
+        "$(du -h "$f" | cut -f1 | tr -d ' ')" \
+        "$(grep -c '"is_error":true' "$f" 2>/dev/null || :)"
+      # Skills, system reminders and slash-command bodies are injected as
+      # user-role text turns; they are harness noise, not things he asked for.
+      # Newlines are collapsed so one pasted diff stays one line, not thirty.
+      jq -r 'select(.type=="user")
+             | .message.content
+             | if type=="string" then . elif type=="array" then (map(select(.type=="text")|.text)|join(" ")) else empty end
+             | gsub("\n";" ⏎ ")' "$f" 2>/dev/null \
+        | grep -v '^[[:space:]]*$' \
+        | grep -vE '^[[:space:]]*(<(system-reminder|command-name|command-message|command-args|local-command)|#[[:space:]])' \
+        | head -8 | cut -c1-200 | sed 's/^/     · /' || :
+    done
+  fi
+  echo ""
+
+  echo "## Claude Code — typed CLI prompts (history.jsonl; PARTIAL, see note)"
+  # Kept only as a cross-check: it is the one place a prompt's project path is
+  # recorded verbatim. Incomplete by design — never quote a count from here.
+  if [[ -r "$CLAUDE_HIST" ]]; then
+    echo "coverage: $(jq -r '.sessionId' "$CLAUDE_HIST" 2>/dev/null | sort -u | wc -l | tr -d ' ') of $(find "$CLAUDE_PROJECTS" -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ') sessions ever recorded; last written $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$CLAUDE_HIST")"
+    jq -r --argjson c "$CURSOR_MS" '
+      select(.timestamp > $c)
+      | [(.timestamp/1000|strftime("%m-%d %H:%M")),
+         ((.project // "-") | sub("^.*/";"")),
+         ((.display // "") | gsub("\n";" ⏎ ") | .[0:220])]
+      | @tsv' "$CLAUDE_HIST" 2>/dev/null | sort | head -60
+  else
+    echo "(no history.jsonl at $CLAUDE_HIST)"
+  fi
+  echo ""
+
+  # ----------------------------------------------------------------- Codex
+  echo "## Codex — sessions touched in window"
+  # Codex logs no error event type at all, so tool failures have to be counted
+  # out of custom_tool_call_output TEXT. That is the only failure signal there
+  # is; without it a Codex session looks clean no matter how badly it went.
+  CODEX_FILES=$(find "$CODEX_SESSIONS" -name 'rollout-*.jsonl' -mmin "-$WINDOW_MINS" 2>/dev/null | sort | head -40)
+  CODEX_N=$(printf '%s\n' "$CODEX_FILES" | grep -c . || :)
+  echo "rollouts in window: $CODEX_N (capped at 40 — say so if this is exactly 40)"
+  if [[ -n "$CODEX_FILES" ]]; then
+    printf '%s\n' "$CODEX_FILES" | while read -r f; do
+      [[ -n "$f" ]] || continue
+      jq -rs --arg sz "$(du -h "$f" | cut -f1)" '
+        (map(select(.type=="session_meta"))|first|.payload) as $m
+        | (map(select(.payload.type=="token_count"))|last|.payload) as $t
+        | "— " + ($m.timestamp // "?")
+        + "  cwd=" + (($m.cwd // "?") | sub("^/Users/[^/]+/";"~/"))
+        + "  src=" + (($m.source // "?") | if type=="string" then . else (keys|join("+")) end)
+        + "/" + ($m.originator // "?")
+        + "  thread=" + (if $m.parent_thread_id then "subagent" else "root" end)
+        + "  cli=" + ($m.cli_version // "?")
+        + "  size=" + $sz,
+          "   user_turns=" + ([.[]|select(.payload.type=="user_message")]|length|tostring)
+        + "  agent_msgs=" + ([.[]|select(.payload.type=="agent_message")]|length|tostring)
+        + "  tool_calls=" + ([.[]|select(.payload.type=="custom_tool_call")]|length|tostring)
+        + "  mcp_calls=" + ([.[]|select(.payload.type=="mcp_tool_call_end")]|length|tostring)
+        + "  compactions=" + ([.[]|select(.type=="compacted")]|length|tostring),
+          "   tokens_total=" + (($t.info.total_token_usage.total_tokens // 0)|tostring)
+        + "  cached_in=" + (($t.info.total_token_usage.cached_input_tokens // 0)|tostring)
+        + "  ctx_window=" + (($t.info.model_context_window // 0)|tostring)
+        + "  rate_limit_primary_used=" + (($t.rate_limits.primary.used_percent // 0)|tostring) + "%"
+      ' "$f" 2>/dev/null || echo "— $(basename "$f") (unparseable)"
+      printf '   tool_output_failures=%s\n' \
+        "$(jq -r 'select(.payload.type=="custom_tool_call_output")|.payload.output // empty' "$f" 2>/dev/null | grep -ciE 'error|failed|not found|denied|no such' || :)"
+      echo "   file: $f"
+    done
+  fi
+  echo ""
+
+  echo "## Codex — thread names (session_index.jsonl, last 15)"
+  tail -15 "$CODEX_DIR/session_index.jsonl" 2>/dev/null \
+    | jq -r '"\(.updated_at)  \(.thread_name // "(unnamed)")"' 2>/dev/null || echo "(none)"
+  echo ""
+
+  echo "## Codex — user turns in window (what he actually asked Codex to do)"
+  # Codex injects <recommended_plugins>/<user_instructions> blocks as user-role
+  # messages, so those are filtered out — they are harness noise, not requests.
+  if [[ -n "$CODEX_FILES" ]]; then
+    printf '%s\n' "$CODEX_FILES" | while read -r f; do
+      [[ -n "$f" ]] || continue
+      jq -r 'select(.payload.type=="user_message")
+             | (.timestamp // "?") + " | " + ((.payload.message // "") | gsub("\n";" ⏎ ") | .[0:220])' "$f" 2>/dev/null \
+        | grep -vE '^\S+ \| *<(recommended_plugins|user_instructions|environment_context)' || :
+    done | sort | head -80
+  fi
+  echo ""
+
+  # --------------------------------------------------------------- machine
+  echo "## Machine housekeeping"
+  echo "macOS: $(sw_vers -productVersion)  ($(sw_vers -buildVersion))"
+  echo "uptime/load: $(uptime | sed 's/^ *//')"
+  echo "root disk: $(df -h / | tail -1 | awk '{print $4" free of "$2" ("$5" used)"}')"
+  echo "brew outdated: $( { brew outdated 2>/dev/null || :; } | wc -l | tr -d ' ') package(s)"
+  { brew outdated 2>/dev/null || :; } | head -12 | sed 's/^/  /'
+  echo ""
+  echo "### assistant state dirs (these only ever grow)"
+  for d in "$HOME/.claude" "$CLAUDE_PROJECTS" "$CODEX_DIR" "$CODEX_SESSIONS"; do
+    printf '  %-42s %s\n' "${d/#$HOME/~}" "$(du -sh "$d" 2>/dev/null | cut -f1)"
+  done
+  echo "  claude transcripts total: $(find "$CLAUDE_PROJECTS" -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')"
+  echo "  codex rollouts total:     $(find "$CODEX_SESSIONS" -name 'rollout-*.jsonl' 2>/dev/null | wc -l | tr -d ' ')"
+  # 2M floor, not 20M: nothing on this host reaches 20M, so a higher floor
+  # silently prints an empty list and reads as "no large transcripts".
+  echo "  largest 5 transcripts (>2M):"
+  find "$CLAUDE_PROJECTS" "$CODEX_SESSIONS" -name '*.jsonl' -size +2M 2>/dev/null | head -60 \
+    | while read -r f; do printf '%s %s\n' "$(du -m "$f" | cut -f1)" "${f/#$HOME/~}"; done \
+    | sort -rn | head -5 | sed 's/^/    /'
+  echo ""
+  echo "### launchd bots loaded for this user"
+  launchctl list 2>/dev/null | awk 'NR==1 || /nicholas|openmarket|pooper|routine/ {print "  "$0}' || :
+  echo ""
+  echo "### git hygiene under ~/Documents/GitlabRepos"
+  for r in "$HOME/Documents/GitlabRepos"/*/; do
+    [[ -d "$r/.git" || -f "$r/.git" ]] || continue
+    n=$(basename "$r")
+    dirty=$( { git -C "$r" status --porcelain 2>/dev/null || :; } | wc -l | tr -d ' ')
+    br=$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
+    ahead=$( { git -C "$r" rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0; } )
+    wt=$( { git -C "$r" worktree list 2>/dev/null || :; } | wc -l | tr -d ' ')
+    printf '  %-34s branch=%-28s dirty=%-4s unpushed=%-4s worktrees=%s\n' "$n" "$br" "$dirty" "$ahead" "$wt"
+  done
+} > "$MANIFEST"
+
+cd "$BASE"
+if claude -p "$(cat "$BASE/PROMPT.md")" \
+  --model claude-sonnet-5 \
+  --add-dir "$CLAUDE_PROJECTS" \
+  --add-dir "$CODEX_DIR" \
+  --allowedTools "Read" "Glob" "Grep" \
+    "Bash(jq:*)" "Bash(grep:*)" "Bash(rg:*)" "Bash(head:*)" "Bash(tail:*)" \
+    "Bash(wc:*)" "Bash(ls:*)" "Bash(find:*)" "Bash(stat:*)" "Bash(du:*)" \
+    "Bash(date:*)" "Bash(cut:*)" "Bash(sort:*)" "Bash(uniq:*)" "Bash(awk:*)" "Bash(sed:*)" \
+  > "$REPORT" 2>"$LOGS/$TODAY.err"; then
+  # Advance the cursor ONLY on success, so a failed run re-reviews its window
+  # tomorrow instead of dropping a day of work on the floor.
+  echo "$NOW_MS" > "$CURSOR_FILE"
+  post_discord "**Workflow review — $TODAY** (\`$HOST\` · Claude + Codex)" "$REPORT" || true
+else
+  rm -f "$REPORT"
+  post_discord "⚠️ **Workflow review failed — $TODAY** (see \`~/.claude/workflow-reviews/logs/$TODAY.err\` on $HOST)" || true
+  exit 1
+fi

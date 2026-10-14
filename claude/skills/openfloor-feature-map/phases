@@ -1,0 +1,12 @@
+# One-night OpenFloor (mobile, openmarket-chat-app) Feature Map build, 2026-09-18.
+# Replaces that night's midnight-scout slot at Nicholas's request.
+# Each phase is its own `claude -p` session (cost is quadratic in session length).
+# `!digest` runs even after a failed or budget-exhausted phase.
+inventory
+map-1
+map-2
+map-3
+map-4
+map-5
+map-6
+!digest

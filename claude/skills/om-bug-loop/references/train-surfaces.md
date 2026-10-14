@@ -2,6 +2,11 @@
 
 *The list `train.ts` reads. One key is one batch PR (`train/<key>`). Why trains exist, and the commands: [[kanban/references/trains|trains]].*
 
+*From 2026-09-28 the web keys ship to
+`gitlab.com/openmarketxyz/frontend/openmarket-chat` MRs. Keys prefixed
+`openmarket-internal-` stay on GitHub. Keys prefixed `mobile-` are
+`openmarket-chat-app` on GitLab.*
+
 **Edit this list freely.** Add a key by adding a line in exactly the shape below — a backticked lowercase-kebab key, an em dash, and what the surface covers. `train.ts ship` refuses a key that is not listed, so a typo (`sidebars`) cannot quietly start a second train; a genuinely new surface is either added here or passed once as `--new-surface "<what it covers>"`, which appends the line for you.
 
 Pick the key by **the file most of the diff lives in**, not by where the symptom was noticed. The point of a train is that PRs on the same files stop conflicting with each other, so the surface is a file boundary first and a product boundary second.
@@ -60,3 +65,11 @@ the smallest one first rather than adding a fourth key for the overlap.*
 - `openmarket-internal-daemon-http` — openmarket-internal: daemon HTTP routes in packages/cli/src/runner/http — the rooms-routes registrar, its auth and operator-proof gates, and the daemon GUI APIs (import, library, librarian, away, tones)
 - `mobile-calls` — OpenFloor calls: incoming ring (Android notification, iOS CallKit/PushKit), `call-ring-notification*`, `modules/openfloor-callkit`, the call push presentation and its answer/decline bridge. While F94 !92 / F156 !98 are unmerged this train stacks on F156's branch (added by F143, 2026-09-25)
 - `search` — message search: SearchBar.tsx, SearchPanel.tsx, search-seam.ts, search-query.ts, search-history.ts, tag-search
+- `archive-modal` — The Archive modal (channels + docs tabs, pick-row doc selection, restore/purge)
+- `kiyotaka-frontend-watchlist` — kiyotaka-frontend: the watchlist — useWatchlist and its sibling composables, the watchlist store and API service, Watchlist.vue and the mobile watchlist
+- `landing-app-links` — kiyotaka-landing-page-v2: the .well-known association files (apple-app-site-association, assetlinks.json) that decide which openmarket.xyz links open OpenFloor
+- `mobile-snackbar` — the global error Snackbar and its dismiss/dedupe logic: snackbar.tsx, snackbar-queue.ts, and its __DEV__ probe door
+- `mobile-build-guard` — Metro/build-config guards that keep __DEV__-only code out of production builds: metro.config.js, its blockList, and structural tests asserting against bundle drift
+- `mobile-notifications` — OpenFloor push notification presentation: OpenFloorNotificationsService.kt (Android presenter/handling delegates), src/push/*, docs/PUSH_NOTIFICATIONS.md
+- `mobile-charts` — the OpenMarket mobile charts app, `kiyotaka-frontend-app` on GitLab (gitlab.com/openmarketxyz/frontend/kiyotaka-frontend-app): symbol dialog, venues, watchlists, Polymarket search, its chat. Added 2026-10-02 for the ⌗ mobile topic to-dos
+- `mobile-charts-web-port` — kiyotaka-frontend-app: ports of web `kiyotaka-frontend` `production` changes filed by web-port-scout (`#web-port` cards). The owner rebases and squash-merges each train MR as soon as its verifier passes (ff-only project, no CI), so it carries one port, occasionally two. Added 2026-10-08

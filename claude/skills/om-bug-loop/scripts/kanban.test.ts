@@ -2,7 +2,7 @@
 // column skeleton, and touches nothing else in a file Nicholas also edits by
 // hand in Obsidian.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { COLUMNS, SKELETON, moveCard, noteProblem, noteSection, statusBlock, MARK_START, cardLine, DEFAULT_BOARD, DEFAULT_PRIORITY, normalizeTask, STAGES, LEGACY_TICK, stripReviewSkipMark } from "./kanban";
@@ -353,6 +353,30 @@ describe("card categories and grouped lane cards", () => {
     expect(after.groupedIn).toBe("group-review-keyboard-focus");
     expect(after.groupedLine).toBe(recovery);
     expect(readFileSync(board, "utf8")).toContain("**Review · Keyboard & focus (1)**");
+  });
+
+  test("a shipped train member folds into its train card, never a group, and a move restores its line", () => {
+    const { board, tasks } = fixture();
+    const raw = JSON.parse(readFileSync(tasks, "utf8"));
+    Object.assign(raw["focus-five"], {
+      category: "keyboard-focus", summary: SUMMARY,
+      train: "sidebar", mrUrl: "https://gitlab.com/o/r/-/merge_requests/101",
+    });
+    writeFileSync(tasks, `${JSON.stringify(raw, null, 1)}\n`);
+    expect(groupTarget(raw["focus-five"], "Review")).toBeNull();
+    const line = readFileSync(board, "utf8").split("\n").find(l => l.includes("cards/focus-five|"))!;
+
+    reconcileMembership(board, tasks, "focus-five");
+    expect(readFileSync(board, "utf8")).not.toContain("cards/focus-five|");
+    expect(readFileSync(board, "utf8")).not.toContain("Keyboard & focus");
+    const folded = JSON.parse(readFileSync(tasks, "utf8"))["focus-five"];
+    expect(folded.groupedIn).toBeUndefined();
+    expect(folded.trainLine).toBe(line);
+
+    expect(run(["upsert", "focus-five", "--column", "Need Attention", ...args(board, tasks)]).code).toBe(0);
+    const attention = readFileSync(board, "utf8").split("## Need Attention")[1]!.split("\n## ")[0]!;
+    expect(attention).toContain(line);
+    expect(JSON.parse(readFileSync(tasks, "utf8"))["focus-five"].trainLine).toBeUndefined();
   });
 
   test("consume flags and file-finding markers carry category and summary without guessing", () => {
@@ -2881,6 +2905,21 @@ describe("play-around cap — #medium is the ceiling for non-feature findings", 
     expect(priorities).toEqual(["#medium"]);
   });
 
+  test("consume keeps a #mobile-charts bug filed through file-finding at #high (web-port-scout)", () => {
+    // Nicholas ruled every mobile-charts card #high (2026-10-02). file-finding
+    // already exempts the tag; consume must too, or the card drops to #medium
+    // the moment the watcher claims it.
+    const board = boardPath("## todo\n\n\n## Done\n\n");
+    const title = "protected script says why";
+    expect(fileFinding(board, title, "#mobile-charts #high #web-port #bug").code).toBe(0);
+    const result = consumeFinding(board, title, "T303", "protected-script-says-why");
+    expect(result.code).toBe(0);
+    expect(result.err).not.toContain("capped");
+    const entry = JSON.parse(readFileSync(tasksFor(board), "utf8"))["protected-script-says-why"];
+    expect(entry.priority).toBe("high");
+    expect(playAroundCap("high", PLAY_AROUND_ORIGIN, false, ["#Mobile-Charts", "#bug"])).toBe("high");
+  });
+
   test("consume keeps play-around features high by tag or F ref and records origin", () => {
     const tagged = boardPath("## todo\n\n\n## Done\n\n");
     const taggedTitle = "library gets quick add";
@@ -3379,6 +3418,35 @@ describe("the todo lane: fold picks by origin, the queue card picks by position"
   });
 });
 
+test("V11 traincard resolves a merged GitLab MR and Review groups label GitLab links MR", () => {
+  const board = boardPath(SKELETON);
+  const tasks = join(dirname(board), "tasks.json");
+  const url = "https://gitlab.com/acme/chat/-/merge_requests/7";
+  writeFileSync(tasks, JSON.stringify({
+    "first-fix": { slug: "first-fix", ref: "T1", title: "First fix", status: "shipped",
+      train: "sidebar", mrUrl: url, priority: "low", product: "chat" },
+  }, null, 1));
+  const stub = join(dirname(board), "glab-stub");
+  writeFileSync(stub, `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ state: "merged" }));\n`);
+  chmodSync(stub, 0o755);
+  const proc = Bun.spawnSync({
+    cmd: ["bun", SCRIPT, "traincard", "sidebar", "--board", board, "--tasks", tasks],
+    cwd: import.meta.dir,
+    env: { ...process.env, KANBAN_GLAB: stub },
+    stdout: "pipe", stderr: "pipe",
+  });
+  expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+  const note = readFileSync(join(dirname(board), "cards/train-sidebar.md"), "utf8");
+  expect(note).toContain(`MR: ${url} (merged)`);
+  const done = readFileSync(board, "utf8").split("## Done\n")[1]!.split("## Withdrawn")[0]!;
+  expect(done).toContain("MR 7 · sidebar");
+  const grouped = groupNote("Review", "keyboard-focus", [{
+    slug: "first-fix", ref: "T1", title: "First fix", mrUrl: url,
+    summary: { problem: "A problem.", solution: "A fix.", repro: ["Try it."] },
+  }], board);
+  expect(grouped).toContain(`MR ${url}`);
+});
+
 // ---------------------------------------------------------------------------
 // Tiers (2026-09-24). `consume` records the tier the coordinator dispatches
 // by; `tier` is the owner's escalation and only ever moves up. The policy is
@@ -3452,13 +3520,104 @@ describe("consume --tier and the up-only tier command", () => {
     expect(run(["tier", "tiered", "normal", "--board", p, "--tasks", tasksPath]).code).toBe(64);
   });
 
-  test("a legacy entry with no tier escalates from normal", () => {
+  test("a legacy entry with no tier, not yet dispatched, records an intake judgement, not an escalation", () => {
     const { p, tasksPath } = consumeWith("#bug");
     const raw = JSON.parse(readFileSync(tasksPath, "utf8"));
     delete raw.tiered.tier; delete raw.tiered.tierSource;
     writeFileSync(tasksPath, JSON.stringify(raw));
     const r = run(["tier", "tiered", "hard", "--why", "session shape", "--board", p, "--tasks", tasksPath]);
     expect(r.code).toBe(0);
+    const entry = JSON.parse(readFileSync(tasksPath, "utf8")).tiered;
+    expect(entry.tier).toBe("hard");
+    expect(entry.tierSource).toBe("judged");
+    expect(entry.tierEscalations).toBeUndefined();
+  });
+
+  test("a legacy entry with no tier that has already been dispatched still escalates from normal", () => {
+    const { p, tasksPath } = consumeWith("#bug");
+    expect(run(["stage", "tiered", "investigating", "--board", p, "--tasks", tasksPath]).code).toBe(0);
+    const raw = JSON.parse(readFileSync(tasksPath, "utf8"));
+    delete raw.tiered.tier; delete raw.tiered.tierSource;
+    writeFileSync(tasksPath, JSON.stringify(raw));
+    const r = run(["tier", "tiered", "hard", "--why", "session shape", "--board", p, "--tasks", tasksPath]);
+    expect(r.code).toBe(0);
     expect(JSON.parse(readFileSync(tasksPath, "utf8")).tiered.tierEscalations[0].from).toBe("normal");
+  });
+
+  test("an explicit normal on an untiered, not-yet-dispatched card is accepted as the intake judgement", () => {
+    const { p, tasksPath } = consumeWith("#bug");
+    const raw = JSON.parse(readFileSync(tasksPath, "utf8"));
+    delete raw.tiered.tier; delete raw.tiered.tierSource;
+    writeFileSync(tasksPath, JSON.stringify(raw));
+    const r = run(["tier", "tiered", "normal", "--why", "test", "--board", p, "--tasks", tasksPath]);
+    expect(r.code).toBe(0);
+    const entry = JSON.parse(readFileSync(tasksPath, "utf8")).tiered;
+    expect(entry.tier).toBe("normal");
+    expect(entry.tierSource).toBe("judged");
+  });
+
+  test("tier resolves a ref, not only a slug", () => {
+    const { p, tasksPath } = consumeWith("#bug", ["--tier", "trivial"]);
+    const r = run(["tier", "T1", "normal", "--why", "cause is in the store, not the render",
+      "--board", p, "--tasks", tasksPath, "--now", "2026-09-24T10:00:00.000Z"]);
+    expect(r.code).toBe(0);
+    const entry = JSON.parse(readFileSync(tasksPath, "utf8")).tiered;
+    expect(entry.tier).toBe("normal");
+    expect(entry.tierEscalations).toEqual([{
+      from: "trivial", to: "normal", at: "2026-09-24T10:00:00.000Z",
+      why: "cause is in the store, not the render",
+    }]);
+  });
+});
+
+describe("file-finding for web-port-scout — mobile-charts stays #high, questions park", () => {
+  const BOARD = "## todo\n\n\n## in progress\n\n\n## Need Attention\n\n\n## Done\n\n";
+  const bugBody = (board: string) => {
+    const file = join(dirname(board), "wp-bug.md");
+    writeFileSync(file,
+      "## Problem\n\n" + "The heatmap sensitivity carry is lost when a template is saved. ".repeat(3) +
+      "\n\n## Evidence\n\n- web 24124a5da8 fix(heatmap): save templates from the live panel state\n" +
+      "\n## Reproduction steps\n\n1. Open a chart with the heatmap from a cold app.\n\n" +
+      "**Expected:** The sensitivity carries.\n**Actual:** It resets.\n");
+    return file;
+  };
+  const lineIn = (board: string, column: string, needle: string) => {
+    const text = readFileSync(board, "utf8");
+    const start = text.indexOf(`## ${column}`);
+    const end = text.indexOf("\n## ", start + 3);
+    return text.slice(start, end < 0 ? undefined : end).split("\n").find(l => l.includes(needle));
+  };
+
+  test("CONTROL: a non-feature #high without #mobile-charts is still capped", () => {
+    const p = boardPath(BOARD);
+    const r = run(["file-finding", "heatmap template sensitivity resets", "--file", bugBody(p),
+      "--tags", "#high #bug", "--board", p]);
+    expect(r.code).toBe(0);
+    expect(lineIn(p, "todo", "heatmap template")).toContain("#medium");
+  });
+
+  test("a #mobile-charts #bug keeps #high", () => {
+    const p = boardPath(BOARD);
+    const r = run(["file-finding", "heatmap template sensitivity resets", "--file", bugBody(p),
+      "--tags", "#mobile-charts #high #web-port #bug", "--board", p]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("capped");
+    expect(lineIn(p, "todo", "heatmap template")).toContain("#high");
+  });
+
+  test("--column \"Need Attention\" files the raw line there, not in todo", () => {
+    const p = boardPath(BOARD);
+    const r = run(["file-finding", "should mobile get the pulse panel", "--file", bugBody(p),
+      "--tags", "#mobile-charts #high #web-port", "--column", "Need Attention", "--board", p]);
+    expect(r.code).toBe(0);
+    expect(lineIn(p, "Need Attention", "pulse panel")).toBe("- [ ] should mobile get the pulse panel #mobile-charts #high #web-port");
+    expect(lineIn(p, "todo", "pulse panel")).toBeUndefined();
+  });
+
+  test("any other --column refuses", () => {
+    const p = boardPath(BOARD);
+    const r = run(["file-finding", "should mobile get the pulse panel", "--file", bugBody(p),
+      "--tags", "#mobile-charts #high", "--column", "Done", "--board", p]);
+    expect(r.code).toBe(64);
   });
 });

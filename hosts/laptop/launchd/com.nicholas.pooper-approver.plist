@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nicholas.pooper-approver</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nicholas/.local/bin/pooper-approver</string>
+  </array>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>300</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/nicholas/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MAX_APPROVALS_PER_CYCLE</key>
+    <string>50</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/nicholas/.local/state/pooper-approver/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nicholas/.local/state/pooper-approver/launchd.err</string>
+</dict>
+</plist>

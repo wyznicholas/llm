@@ -1,0 +1,38 @@
+#!/bin/bash
+# Fixture gate for the OpenFloor Feature Map night. Reads of ~/Documents go
+# through Homebrew node: under launchd, /bin/cat and /usr/bin/git are TCC-denied
+# there while writes still succeed, so a bash read would come back empty.
+set -uo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+REPO="$HOME/Documents/GitlabRepos/openmarket-chat-app"
+VAULT="$HOME/Documents/Obisidian/openmarket/Feature Map"      # web map, read for the bar
+OUT="$HOME/Documents/Obisidian/openmarket-mobile/Feature Map"   # tonight's output
+/opt/homebrew/bin/node -e '
+  const fs=require("fs"),cp=require("child_process");
+  const [repo,vault,work,out]=process.argv.slice(1);
+  let rc=0;
+  try { fs.readFileSync(repo+"/docs/NAVIGATION.md","utf8").length>100 || (()=>{throw 0})();
+        const head=cp.execFileSync("git",["-C",repo,"log","-1","--format=%h %ci %s"]).toString().trim();
+        console.log("preflight: repo readable @ "+head);
+        if (work) fs.writeFileSync(work+"/commit.txt", head+"\n");
+  } catch(e){ console.log("preflight: FATAL cannot read "+repo); rc=1; }
+  try { fs.readFileSync(vault+"/README.md","utf8").length>100 || (()=>{throw 0})();
+        console.log("preflight: vault readable");
+  } catch(e){ console.log("preflight: FATAL cannot read "+vault+"/README.md"); rc=1; }
+  try { const t=out+"/.preflight-write"; fs.writeFileSync(t,"ok"); fs.readFileSync(t,"utf8")==="ok" || (()=>{throw 0})(); fs.unlinkSync(t);
+        console.log("preflight: output dir writable: "+out);
+  } catch(e){ console.log("preflight: FATAL cannot write "+out); rc=1; }
+  process.exit(rc);
+' "$REPO" "$VAULT" "${ROUTINE_WORK:-}" "$OUT" || exit 1
+# Emulator is optional: its absence downgrades the night to source-read entries, it does not stop it.
+ADB=/opt/homebrew/share/android-commandlinetools/platform-tools/adb
+if [[ -x $ADB ]] && $ADB get-state 2>/dev/null | grep -q device; then
+  if $ADB shell pm list packages 2>/dev/null | grep -q com.openmarket.chat; then
+    echo "preflight: emulator up, com.openmarket.chat installed"
+  else
+    echo "preflight: emulator up, app NOT installed — source-read only"
+  fi
+else
+  echo "preflight: no emulator — source-read only"
+fi
+exit 0

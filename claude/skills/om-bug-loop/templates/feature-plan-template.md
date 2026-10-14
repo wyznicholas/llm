@@ -129,7 +129,7 @@ and three criteria is 7-10, not 40.
 
 - **What could break:** {{risk}}
 - **What this deliberately does NOT do:** {{non_goals}}
-- **(chat lane) Shared files touched:** {{shared_files}} <!-- parity fence -->
+- **(chat lane) Shared files touched:** {{shared_files}}
 - **regression-impact-check:** {{regression_impact}} <!-- required when kiyotaka-frontend is touched -->
 
 ## Slices

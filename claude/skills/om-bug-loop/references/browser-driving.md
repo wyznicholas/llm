@@ -300,6 +300,20 @@ took his daemon down on 2026-09-15. Kill only the PID you recorded when you
 started it; the recipes are in `openmarket-chat-env.md` §5d (test runs) and §7
 (daemons). `:31417` is never yours to stop, restart or kill.
 
+**A WS write filter must never drop `PING` (T232, 2026-09-25).** The filter
+copied through the agent-dock probes, `/(…|MARK|ACK|…|PIN|SAVE)/i`, matches
+`"PING"` because it contains `PIN`. Dropping that frame is not harmless.
+Dispatching `online`, `focus` after a sleep gap, or the stall watchdog runs the
+rooms client's recovery check (`recoverConnection`), which sends `PING` and
+replaces the socket if no `PONG` arrives within 3 s. While it reconnects,
+`live` is false, and every live-only surface unmounts and remounts as a new
+node: the agent dock, voice controls, daemon-only controls. On T232 that
+produced a reproducible "dock blinks out" bug that did not exist: 4 out of 4
+blinks with `PING` dropped, 0 out of 4 with it forwarded, on the same build.
+Match the parsed frame `type` against an exact list of write types, and treat
+a `ws-drop PING` line in your safety log as a voided presence or focus
+measurement.
+
 ## 3c. A `\n` inside `.type()` on a chat composer SENDS THE MESSAGE
 
 Playwright's `.type()` and `.fill()` replay real key events, and on the OM Chat

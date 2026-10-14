@@ -40,6 +40,24 @@ the write is route-intercepted. Reading is safe; sending is not.
 A surface that cannot be reached inside `nalo` is one this lane cannot verify
 yet. Say so in the write-up rather than inventing a walked path.
 
+## iOS simulators: use the pool, never create one
+
+*Nicholas, 2026-10-02.* Signed-out work, meaning fixture doors and mockup builds, runs on one of two persistent simulators. **Never `simctl create`, `clone` or `erase` a device.**
+
+| device | UDID | state |
+|---|---|---|
+| iPhone Test1 | `48E2EAA5-5BA0-499E-AE2F-98FA28079515` | iOS 26.5, signed out |
+| iPhone Test2 | `C2800F78-7B85-48A0-8CB8-6153686FCEA7` | iOS 26.5, signed out |
+
+**Why.** A brand-new simulator's first boot runs a setup storm: about 25 `MTLCompilerService` shader compiles, about 27 `SetStoreUpdateService`, `mediaanalysisd`, `iconservicesagent`, and SpringBoard's first launch. Two owners each creating "fresh" sims pushed load to 308 on 2026-10-02, and three did 537 the day before, against a dispatch gate of 12. A pool device pays that cost once.
+
+**How:**
+1. **Claim.** Add `simPool.holders.<udid> = {ref, since, what}` in `~/.claude/om-bug-loop/locks/emulator.lock` (temp file + rename) before you boot or install anything. One owner per device. If both are held, queue and tell the coordinator; do not create a sim.
+2. **Switch builds with uninstall + install**, never erase: `xcrun simctl uninstall <udid> sh.openmarket.openfloor && xcrun simctl install <udid> <app>`. The mockup app and OpenFloor can both stay installed.
+3. **Confirm the bundle every time.** A pool device has served other owners, and the Expo dev launcher reconnects to the last dev server it used. Trust Metro's "iOS Bundled" line, not the screen.
+4. **Never sign in on a pool device.** Signed-in work belongs to `om-agents-iPhone` alone.
+5. **Release.** Leave the device **booted**: a re-boot is cheap, a first boot is not. Stop your own Metro by PID, remove your holder entry, and tell the coordinator.
+
 ## 1. The traps, in the order they bite
 
 ### 1. Node 22, not 20 — `docs/OPENFLOOR-ONBOARDING.md` is stale
@@ -141,30 +159,52 @@ not the app, and dismissing it is not an app write.
 Driving and observing:
 
     adb exec-out screencap -p > shot.png
-    adb exec-out uiautomator dump /dev/tty      # labels and bounds
+    adb exec-out uiautomator dump --compressed /dev/tty  # labels and bounds
+
+Always use `--compressed`. Without it, the dump also lists the screen directly
+underneath, first, before the visible screen's nodes.
 
 Identifiers: Android package `com.openmarket.chat`, iOS bundle
 `sh.openmarket.openfloor`, scheme `openfloor://` (Android also filters `om://`).
 They deliberately do not match.
+
+### `CI=1 expo start` never reloads
+
+With `CI=1`, Expo turns off Metro's file watching. Edits never reach the device,
+even after a force-stop relaunch, until Metro restarts with `--clear`. Start it
+with `CI` removed:
+
+    env -u CI pnpm exec expo start --dev-client --port <your-ref-port> --clear < /dev/null
+
+Use your own ref-derived port, never 8081. Do not use an empty `CI=`; that crashes
+`expo start` in `getenv`. Before measuring, prove the bundle is current with a
+visible change. T262 measured this behavior.
 
 ### `glab` flags that waste a cycle
 
 - **Image uploads need `--form`, not `--field`.** `glab api projects/<enc>/uploads --field file=@shot.png` returns **400**; `--form file=@shot.png` works and returns the `markdown` to paste.
 - **`glab mr create` has no `--no-squash-before-merge`.** Do not reach for it.
 
-### A screenshot can show you the wrong screen
+### A plain uiautomator dump lists the screen underneath too
 
-**After the back-stack is disturbed, `adb exec-out screencap` AND `uiautomator dump`
-both return the frozen PREVIOUS layer**, not the screen you just opened — found by
-T249/T250 (2026-09-18), which lost two capture attempts to it.
+T262 proved that a plain `uiautomator dump` includes the screen directly beneath
+the visible one and lists its nodes first. The evidence is in
+`kanban/evidence/T262/`.
 
-This is the worst class of tooling bug for this pipeline, because it does not fail:
-it hands you a confident, well-formed artifact of the wrong thing, and a before/after
-pair built from it will look perfect and prove nothing. `am force-stop` clears it.
+The app marks each non-visible layer `inert` in `src/ui/screen-layer.tsx:440`;
+that becomes Android's hide-from-accessibility settings at lines 528-529, which
+`--compressed` honors. A plain dump asks Android to include those hidden views.
+The layer directly beneath stays mounted, unfrozen, and in position for right-drag
+navigation by design (`screen-layer.tsx:439`). Layers render bottom-to-top
+(`screen-layer.tsx:430`), so the underlying layer's nodes come first even though
+it is not the screen being shown.
 
-So: after any navigation that goes backwards, assert the capture shows what you
-think it does — check for a label only the new screen has — before you treat it as
-evidence.
+Always use `uiautomator dump --compressed`, and never compute a tap from a plain
+dump. T262 did not reproduce the screenshot claim in about 30 captures across 9
+disturbance classes; that does not disprove the original report. If a screencap
+ever disagrees with a compressed dump, record the router state and file a card
+instead of force-stopping. T262 drew the router's `state.index` and route names on screen with a scratch, never-committed overlay in
+`src/navigation/layer-stack.tsx`; the recipe is in `openmarket/plans/om-bug-loop/T262/plan.md` (vault).
 
 ## Emulator state that survives your task
 
@@ -308,7 +348,7 @@ receipt**, which is visible to the other person and cannot be withdrawn.
 
 Reads are not free on this account. Before any tap sequence near the Chats
 inbox, re-dump the layout rather than reusing an earlier capture (see "A
-screenshot can show you the wrong screen"), and prefer a `testID` lookup to a
-coordinate whenever one exists. If you do land somewhere you should not be, back
-out and **disclose it** — F113's verifier did, which is the only reason it is
-written down here.
+plain uiautomator dump lists the screen underneath too"), and prefer a `testID`
+lookup to a coordinate whenever one exists. If you do land somewhere you should
+not be, back out and **disclose it** — F113's verifier did, which is the only
+reason it is written down here.

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>xyz.openmarket.om-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/Cellar/bun/1.3.14/bin/bun</string>
+    <string>run</string>
+    <string>src/bootstrap.ts</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/ombot/repos/om-agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OM_AGENT_CONFIG</key>
+    <string>/Users/ombot/repos/om-agent/config.toml</string>
+    <key>OM_AGENT_SUPERVISED</key>
+    <string>1</string>
+    <key>OM_AGENT_STATE_DIR</key>
+    <string>/Users/ombot/repos/om-agent/.state</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/Cellar/bun/1.3.14/bin:/Users/ombot/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <!-- A launchd job inherits `launchctl limit maxfiles` (soft 256), not the operator shell's
+       far higher limit. 256 is too few for a long-lived process holding sqlite, a WebSocket and
+       subprocess pipes, and Bun blames a low limit for unrelated startup errors, which sends
+       an operator hunting the wrong fault. launchd clamps to kern.maxfilesperproc. -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <!-- The application writes and rotates om-agent.log itself, so the supervisor's capture must
+       land somewhere else: launchd holds this descriptor open, and a rotation renaming the file
+       under it would leave every later line going to an unlinked inode. What arrives here is
+       only what escapes the logger — a Bun abort, a startup failure before the log opens. -->
+  <key>StandardOutPath</key>
+  <string>/Users/ombot/repos/om-agent/.state/om-agent.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ombot/repos/om-agent/.state/om-agent.stdout.log</string>
+</dict>
+</plist>

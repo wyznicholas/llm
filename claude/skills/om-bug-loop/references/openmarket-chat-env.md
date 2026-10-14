@@ -217,13 +217,13 @@ children's groups. macOS has no `setsid`, and the Bash tool's zsh refuses `set -
 
 ```bash
 # start — the runner becomes its own group leader; its PID is recorded, not guessed
-bash -c 'set -m; cd "$1" && bun tools/test-fast.ts > "$2/test-run.log" 2>&1 & echo $! > "$2/test-run.pid"' _ "$WT" "$S"
+bash -c 'set -m; cd "$1" && bun tools/test-fast.ts > "$2/test-run.log" 2>&1 & echo $! > "$2/test-run-T<NN>.pid"' _ "$WT" "$S"
 
 # stop — the runner's group, then each shard's group (snapshot the children BEFORE the
 # runner dies: once they reparent to launchd nothing ties them to your run by parent).
 # The pgid==pid guard is load-bearing: without job control `$!` shares your shell's
 # group, and `kill -- -<that pgid>` would signal your own shell.
-RUN_PID=$(cat "$S/test-run.pid")
+RUN_PID=$(cat "$S/test-run-T<NN>.pid")
 for P in "$RUN_PID" $(ps -A -o pid=,ppid= | awk -v r="$RUN_PID" '$2==r {print $1}'); do
   [ "$(ps -o pgid= -p "$P" 2>/dev/null | tr -d ' ')" = "$P" ] && kill -TERM -- "-$P"
 done
@@ -310,44 +310,30 @@ comm -13 fail-baseline.txt fail-after.txt     # must be empty
 `renewal > calls before markConnected keep single-attempt semantics for the doors`
 is a known flake — it failed on the baseline and passed on the fix.
 
-## The parity ledger
+## The parity ledger (retired 2026-09-14)
 
-`tools/sync-shared.ts --diff` compares MANIFESTS, not files, so its source must be
-a checkout whose manifest reflects the state you mean. From a linked worktree the
-default source (`../openmarket-chat`) does not exist — always pass the path
-explicitly:
+`tools/parity-manifest.json` and `tools/sync-shared.ts` are gone as of
+`f190644c` ("one repo for both GUIs, sharing `packages/chat-ui`"): the
+copy-and-hash parity machinery between the daemon fork and the hosted fork
+retired along with the manifest, the coverage fence and the import-closure
+fence. `openmarket-chat-cloud` itself was retired 2026-09-23; the hosted build
+now comes from `apps/cloud` in this same repo, importing `packages/chat-ui`
+directly rather than copying files into a separate fork. There is no manifest
+left to diff or re-pin, and no fence obligation to reason about — a shared-file
+edit needs nothing beyond the normal gates.
 
-```bash
-bun tools/sync-shared.ts --diff ~/Documents/GitlabRepos/wt/openmarket-chat-<slug>
-```
+## Shipping: GitLab
 
-`--refresh` re-pins the WHOLE manifest to the current tree, so confirm first that
-your files are the only ones off their pin, or you will silently bless someone
-else's uncommitted edit. Test files are only SELECTIVELY manifested — e.g.
-`test/notification-tones.test.tsx` is in neither fork's manifest, so porting it
-does not move the divergence count.
+`glab` has worked again since 2026-09-07. The old `invalid_grant` workaround
+addressed the retired `openmarket-chat-cloud` fork and must not be used for the
+current repository. `train.ts` follows `origin`, pushes the surface branch and
+creates or updates the GitLab MR through `glab api`.
 
-## Shipping: `glab` is broken, git push is not
+There is no `user.email` configured in this repo. The house identity is
+`Nicholas Wong <nicholaswong@trontalgroup.com>`; set it per commit with
+`GIT_AUTHOR_*` / `GIT_COMMITTER_*` rather than writing repository config.
 
-`glab` fails every command with `Oauth2: "invalid_grant"`, `auth status` included.
-`git push` still works, because it uses the osxkeychain credential helper. Open
-the MR through the REST API with that same credential:
-
-```bash
-TOKEN=$(printf 'protocol=https\nhost=gitlab.com\n\n' | git credential fill | sed -n 's/^password=//p')
-curl -X POST -H "PRIVATE-TOKEN: $TOKEN" -H "Content-Type: application/json" \
-  --data @payload.json \
-  "https://gitlab.com/api/v4/projects/openmarketxyz%2Ffrontend%2Fopenmarket-chat-cloud/merge_requests"
-```
-
-There is no `user.email` configured in this repo, so commits land as
-`nicholas <nicholas@nicholass-Mac-mini.local>` (two on `origin/main` already do).
-The house identity is `wyznicholas <nicholaswong@trontalgroup.com>` — set it
-per-commit with `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars rather than writing repo
-config.
-
-MRs here get **no pipeline** (CI runs on `main` only), so the local baseline diff
-is the entire safety net.
+Every openmarket-chat MR needs a green GitLab pipeline before it can merge.
 
 ## Proving a settings/CSS change without a GUI
 
@@ -395,9 +381,9 @@ set -a; . "$S/om-home/clone-guard.env"; set +a   # both chat planes -> the guard
 cd ~/Documents/GitlabRepos/openmarket-internal
 OM_HOME="$S/om-home" OM_BIND=127.0.0.1:319NN \
   OM_ROOMS_GUI_DIR="<your worktree>/dist" bun packages/cli/src/bootstrap.ts run &
-echo $! > "$S/daemon-319NN.pid"         # the ONLY handle you may ever kill this daemon by
+echo $! > "$S/daemon-T<NN>-319NN.pid"         # the ONLY handle you may ever kill this daemon by
 sleep 22
-assert_clone_inert "$(cat "$S/daemon-319NN.pid")" "$S/om-home"; echo "tripwire rc=$?"   # refuses if it can reach him
+assert_clone_inert "$(cat "$S/daemon-T<NN>-319NN.pid")" "$S/om-home"; echo "tripwire rc=$?"   # refuses if it can reach him
 curl -s http://127.0.0.1:319NN/rooms/ | grep -o 'v=[a-f0-9]*' | head -2 | tail -1   # asset stamp
 ```
 
@@ -504,7 +490,7 @@ was in `~/OpenMarket/home/` a second later, on every synced device. `stop_clone_
   2026-09-15); require them to agree, and never act on `:31417`:
 
   ```bash
-  PORT=319NN; PID=$(cat "$S/daemon-$PORT.pid")
+  PORT=319NN; PID=$(cat "$S/daemon-T<NN>-$PORT.pid")
   [ "$PORT" != 31417 ] && [ "$(lsof -ti tcp:$PORT -sTCP:LISTEN)" = "$PID" ] \
     && [ "$(curl -s http://127.0.0.1:$PORT/healthz | grep -o '"pid":[0-9]*' | cut -d: -f2)" = "$PID" ] \
     && kill -TERM "$PID" || echo "refusing: $PORT's listener is not the daemon I started"
@@ -574,18 +560,18 @@ Two things follow:
   and the test file's shard reshuffle responsible. Then run each newly-listed file alone;
   10 of 11 passed, and the 11th failed identically alone on the merge-base.
 
-## 11. CI on a PR can get FURTHER than `main` does
+## 11. CI on an MR can get FURTHER than `main` does
 
-The workflow order is Typecheck → Build → Assert bundle layout → Check dist hygiene → Lint
-→ Test, and it stops at the first failure. `main` has been dying at **Typecheck** on
+The pipeline order is Typecheck → Build → Assert bundle layout → Check dist hygiene → Lint
+→ Test, and dependent jobs stop at the first failure. `main` has been dying at **Typecheck** on
 rooms-client symbols that were never published, so Build/Lint/Test are *skipped* there and
-`main` has no lint or test signal at all. A PR that clears Typecheck then dies at **Lint**
+`main` has no lint or test signal at all. An MR that clears Typecheck then dies at **Lint**
 on the 56 pre-existing biome errors is not worse than `main` — it is strictly further
-along. Compare the per-step conclusions, not the red X:
+along. Compare the GitLab per-job statuses, not the red pipeline badge:
 
 ```bash
-gh api repos/openmarket-xyz/openmarket-chat/actions/runs/<id>/jobs \
-  -q '.jobs[].steps[] | "\(.number) \(.name): \(.conclusion)"'
+glab api "projects/openmarketxyz%2Ffrontend%2Fopenmarket-chat/pipelines/<id>/jobs" \
+  --paginate | jq -r '.[] | "\(.name): \(.status)"'
 ```
 
 Then prove the failing step is pre-existing by running it on two same-commit worktrees back
@@ -596,7 +582,7 @@ to back (`Found 56 errors` on both, and no diagnostic naming a touched file).
 Five commits landed on `main` during one ~1.5h to-do, including a `parity-manifest` sweep
 that could have pulled the touched files behind the fence (it did not — check, do not
 assume) and a `rooms-client` bump. Before calling an MR done: refetch, rebase, re-run
-typecheck/build/check-dist and the focused test, and re-check the manifest for your files.
+typecheck/build/check-dist and the focused test.
 
 ## Getting a `.md` doc DOCKED on a cloned home (added 2026-09-04, T43)
 

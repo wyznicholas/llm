@@ -1,0 +1,4 @@
+# Pinned to Sonnet: rule 1 makes flakiness a K-run measurement rather than an anecdote, and rule 4 proves
+# the fix by the same instrument. Both are counting, not judging.
+# Opus remains the default for every routine whose rule 1 is a judgement call.
+claude-sonnet-5

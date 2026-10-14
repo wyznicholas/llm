@@ -108,4 +108,4 @@ Inputs: task {{task}}, worktree {{worktree}} (branch {{branch}}), approved plan
      suspected cause) to {{evidence_dir}}/review-fail.md and report it. Do
      NOT push anything and do NOT write a card note.
 **(chat lane)** Respect the same house rules given to the implementer (no AI attribution,
-no stash, exact-path staging, parity fence).
+no stash, exact-path staging).

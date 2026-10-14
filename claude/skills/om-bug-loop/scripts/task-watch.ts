@@ -16,8 +16,9 @@
 // Usage:  bun task-watch.ts            # one shot
 //         bun task-watch.ts --quiet-after 15 --over 60
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+import { DEFAULT_BOARD, DEFAULT_TASKS, STAGES } from "./kanban";
 
 /** Slugs whose card sits in `Need Attention` — parked on a question for
  *  Nicholas, not overrunning. Without this the watcher counts a parked task's
@@ -26,11 +27,10 @@ import { join } from "node:path";
  *  ignore the one alert that was real. `stages` cannot express "parked", so
  *  the board is the only place this is written down. */
 function parkedSlugs(): Set<string> {
-  const board = "/Users/nicholas/Documents/Obisidian/kanban/Kanban.md";
   const out = new Set<string>();
-  if (!existsSync(board)) return out;
+  if (!existsSync(BOARD)) return out;
   let column = "";
-  for (const line of readFileSync(board, "utf8").split("\n")) {
+  for (const line of readFileSync(BOARD, "utf8").split("\n")) {
     const heading = /^##\s+(.+?)\s*$/.exec(line);
     if (heading) { column = heading[1]!; continue; }
     if (column !== "Need Attention") continue;
@@ -40,13 +40,17 @@ function parkedSlugs(): Set<string> {
   return out;
 }
 
+function argValue(flag: string): string | undefined {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
 
-const HOME = homedir();
-const TASKS = join(HOME, ".claude", "om-bug-loop", "tasks.json");
-const EVIDENCE = join(HOME, ".claude", "om-bug-loop", "evidence");
+const BOARD = argValue("--board") ?? DEFAULT_BOARD;
+const TASKS = argValue("--tasks") ?? DEFAULT_TASKS;
+const EVIDENCE = join(dirname(BOARD), "evidence");
 
 /** Statuses that mean an agent should currently be working. */
-const LIVE = new Set(["investigating", "implementing", "reviewing"]);
+const LIVE = new Set(["investigating", "planned", "implementing", "reviewing"]);
 
 function argNum(flag: string, dflt: number): number {
   const i = process.argv.indexOf(flag);
@@ -66,9 +70,12 @@ const mins = (ms: number) => Math.floor(ms / 60000);
 
 /** Newest mtime under a directory, or 0. Evidence dirs are sometimes symlinked
  *  to a `manual-<slug>` twin, so try both spellings. */
-function lastWrite(slug: string): number {
+function lastWrite(ref: string | null | undefined, slug: string): number {
   let newest = 0;
-  for (const dir of [join(EVIDENCE, slug), join(EVIDENCE, `manual-${slug}`)]) {
+  const candidates = [ref, slug, slug ? `manual-${slug}` : undefined]
+    .filter((v): v is string => Boolean(v));
+  for (const name of candidates) {
+    const dir = join(EVIDENCE, name);
     if (!existsSync(dir)) continue;
     const walk = (d: string) => {
       let entries: string[];
@@ -125,8 +132,33 @@ function rows(): Row[] {
     // so the gap before `implementing` is now the owner working, not waiting.)
     const startStamp = st.implementing ?? st.investigating
       ?? stamps.reduce((a, b) => (a < b ? a : b));
-    const started = new Date(startStamp).getTime();
-    const lw = lastWrite(t.slug);
+    // A task whose `stages` already carries a timestamp for a stage LATER, in
+    // `STAGES` order, than the one `t.status` currently names can only have
+    // gotten there by reaching that later stage and then being moved BACK to
+    // an earlier live status — reopened after shipping, resumed after being
+    // parked, redispatched by hand. `stages` is append-only (`kanban.ts
+    // recordStage`), so no new stamp marks the moment it happened; the
+    // fallback above then silently resolves to whichever PRE-reopen stamp
+    // wins the `??` chain. Detectable without any new required field: does a
+    // later stage already have a stamp?
+    const statusIdx = (STAGES as readonly string[]).indexOf(t.status);
+    const reopened = statusIdx >= 0 && Object.keys(st).some(
+      s => (STAGES as readonly string[]).indexOf(s) > statusIdx);
+
+    // `reopenedAt`: an optional, hand-set ISO timestamp recording exactly "this
+    // task was put back into a live status at this moment" — task-watch never
+    // writes it (nothing in this file does; grep confirms no writeFileSync/
+    // renameSync anywhere), it only reads it when an operator sets it as part
+    // of the same manual edit that resets `status` back to a live value
+    // (there is no dedicated command for that reset today — see T52's plan).
+    // When present and later than the naive `startStamp` above, it fully
+    // replaces it: it is a precise answer `stages` cannot give once a stage
+    // name has already been stamped once.
+    const reopenedAtMs = typeof t.reopenedAt === "string" ? Date.parse(t.reopenedAt) : NaN;
+    const naiveStarted = new Date(startStamp).getTime();
+    const confirmedReopen = Number.isFinite(reopenedAtMs) && reopenedAtMs > naiveStarted;
+    const started = confirmedReopen ? reopenedAtMs : naiveStarted;
+    const lw = lastWrite(t.ref, t.slug);
     const row: Row = {
       ref: t.ref ?? "-", slug: t.slug, status: t.status,
       elapsed: mins(now - started),
@@ -134,6 +166,7 @@ function rows(): Row[] {
       flags: [],
     };
     if (parked.has(t.slug)) row.flags.push("parked");
+    else if (reopened && !confirmedReopen) row.flags.push("reopened");
     else if (row.elapsed >= OVER) row.flags.push("OVER-HOUR");
     else if (row.elapsed >= WARN) row.flags.push("checkpoint");
     if (row.quiet >= QUIET_AFTER) row.flags.push(`quiet-${row.quiet}m`);
@@ -177,7 +210,7 @@ function main(): number {
 //
 //   exit 0  a task has crossed the hour (or a new one has), act on it
 //   exit 3  heartbeat, nothing to report in a long while
-const POLL_MS = 120_000;          // 2 min; elapsed changes slowly
+const POLL_MS = argNum("--poll-ms", 120_000); // 2 min; elapsed changes slowly
 const HEARTBEAT_MS = 3_600_000;   // an hour of nothing to say
 
 async function watch(): Promise<never> {
@@ -207,7 +240,7 @@ async function watch(): Promise<never> {
       for (const r of fresh) {
         process.stdout.write(
           `${r.flags.includes("OVER-HOUR") ? "OVER-HOUR" : "checkpoint"}  ${r.ref}  ` +
-          `${r.slug}  ${r.elapsed}m  last-write ${r.quiet}m\n`);
+          `${r.slug}  ${r.elapsed}m  last-write ${r.quiet < 0 ? "–" : `${r.quiet}m`}\n`);
       }
       process.exit(0);
     }

@@ -8,9 +8,11 @@
 // Usage:
 //   bun train.ts ship <ref> --surface <key> --branch <owner-branch> --section <md> (--test-cmd <cmd> [--test-list <file>] | --test-list <file> | --verified <log>)
 //   bun train.ts drop <ref> [--surface <key>] [--reason <why>]
-//   bun train.ts status [--repo <checkout>] [--gh-repo <owner/name>]
-//   bun train.ts landed [--repo <checkout>] [--gh-repo <owner/name>]
+//   bun train.ts move <surface> [--from-remote github] [--dry-run] [--repo <checkout>]
+//   bun train.ts status [--repo <checkout>] [--gh-repo <owner/name>] [--gl-repo <group/name>]
+//   bun train.ts landed [--repo <checkout>] [--gh-repo <owner/name>] [--gl-repo <group/name>]
 // Exit 5 means the ship succeeded, but its card could not move to Review.
+// Exit 75 means the destination forge is on a ship hold; nothing was rebased or pushed.
 import {
   closeSync,
   copyFileSync,
@@ -124,7 +126,17 @@ export function parseSection(text: string): ParsedSection {
 }
 
 export function trainTitle(surface: string, refs: string[]): string {
-  return `train(${surface}): ${refs.length} fixes — ${refs.join(", ")}`;
+  const max = 255;
+  const prefix = `train(${surface}): ${refs.length} fixes — `;
+  const full = `${prefix}${refs.join(", ")}`;
+  if (full.length <= max) return full;
+
+  for (let shown = refs.length - 1; shown > 0; shown--) {
+    const title = `${prefix}${refs.slice(0, shown).join(", ")}, +${refs.length - shown} more`;
+    if (title.length <= max) return title;
+  }
+
+  return `${prefix}+${refs.length} more`.slice(0, max);
 }
 
 export interface BodyRow {
@@ -139,11 +151,27 @@ export interface BodyRow {
 }
 const cell = (v: unknown) => String(v).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
+/** renderBody is the only writer of a ref's PR-body heading; a section body
+ *  that already opens with its own "## <ref>" line (bare, or with a title)
+ *  is a leftover from a pre-train per-task PR description and must not
+ *  survive, or the heading is emitted twice (T278). */
+function stripOwnHeading(body: string, ref: string): string {
+  const trimmed = body.trim();
+  const re = new RegExp(`^##\\s+${ref}\\b[^\\n]*\\n+`);
+  return trimmed.replace(re, "").trim();
+}
+
 /** The body is regenerated from train commits plus durable sections, keeping
  * the PR an accurate manifest after every append or drop. */
-export function renderBody(rows: BodyRow[], unattributed: string[], notes = ""): string {
-  const first =
-    "**Merge with Rebase and merge.** Each fix is one or more commits whose subject starts with its ref, so any single fix can be reverted on its own.";
+export function renderBody(
+  rows: BodyRow[],
+  unattributed: string[],
+  notes = "",
+  opts: { forge?: "github" | "gitlab"; preamble?: string } = {},
+): string {
+  const first = opts.forge === "gitlab"
+    ? "**Merge as a fast-forward — press Rebase first if GitLab asks, and never squash.** Each fix is one or more commits whose subject starts with its ref, so any single fix can be reverted on its own."
+    : "**Merge with Rebase and merge.** Each fix is one or more commits whose subject starts with its ref, so any single fix can be reverted on its own.";
   const table = [
     "| fix | ref | files | lines ± | verifier | how to try |",
     "| --- | --- | ---: | ---: | --- | --- |",
@@ -152,7 +180,9 @@ export function renderBody(rows: BodyRow[], unattributed: string[], notes = ""):
         `| ${cell(r.title)} | ${r.ref} | ${r.files} | +${r.added} −${r.deleted} | ${cell(r.verdict)} | ${cell(r.try)} |`,
     ),
   ];
-  const sections = rows.map((r) => `## ${r.ref} · ${r.title}\n\n${r.body.trim()}`);
+  const sections = rows.map(
+    (r) => `## ${r.ref} · ${r.title}\n\n${stripOwnHeading(r.body, r.ref)}`,
+  );
   const tail = unattributed.length
     ? [
         `## unattributed`,
@@ -163,6 +193,7 @@ export function renderBody(rows: BodyRow[], unattributed: string[], notes = ""):
       ].join("\n")
     : "";
   return [
+    ...(opts.preamble?.trim() ? [opts.preamble.replace(/\n+$/, ""), ""] : []),
     first,
     "",
     ...table,
@@ -172,6 +203,13 @@ export function renderBody(rows: BodyRow[], unattributed: string[], notes = ""):
     ...(tail ? ["", tail] : []),
     "",
   ].join("\n");
+}
+
+/** A migration header belongs to the train, not to any task section. */
+export function parseBodyPreamble(body: string): string {
+  const match = /^\*\*Merge /m.exec(body);
+  if (!match || match.index === 0) return "";
+  return body.slice(0, match.index).replace(/\n+$/, "");
 }
 
 /** Existing hand-built sections are imported before regeneration, because a
@@ -446,6 +484,7 @@ const gitCommitMaybe = (repo: string, ...args: string[]) =>
   exec(["git", ...args], repo, HOUSE_COMMITTER);
 const ghBin = () => process.env.TRAIN_GH ?? "gh";
 const gh = (repoPath: string, ...args: string[]) => must([ghBin(), ...args], repoPath);
+const glabBin = () => process.env.TRAIN_GLAB ?? "glab";
 const kanbanPath = () => process.env.TRAIN_KANBAN ?? join(import.meta.dir, "kanban.ts");
 
 interface LockInfo {
@@ -544,15 +583,35 @@ export function withSurfaceLock<T>(
   }
 }
 
-interface Pull {
+export interface Pull {
   number: number;
   url: string;
-  state: string;
-  title?: string;
-  body?: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  title: string;
+  body: string;
   createdAt: string;
-  headRefName?: string;
-  [key: string]: unknown;
+  headRefName: string;
+  headRefOid: string;
+  mergeable: string;
+  mergeStateStatus: string;
+  ci: string;
+  commits: Array<{ messageHeadline: string }>;
+}
+export interface ForgeAddress {
+  kind: "github" | "gitlab";
+  host: string;
+  repo: string;
+  key: string;
+}
+interface Forge extends ForgeAddress {
+  label: "#" | "!";
+  listForHead(surface: string): Pull[];
+  view(number: number): Pull;
+  list(state: "open" | "merged"): Pull[];
+  listOpenAll(): Pull[];
+  create(head: string, title: string, bodyFile: string): { number: number; url: string };
+  edit(number: number, title: string, bodyFile: string): void;
+  close(number: number, comment: string): void;
 }
 interface TrainState {
   continuing: boolean;
@@ -569,36 +628,196 @@ function parseJson<T>(text: string, fallback: T): T {
     return fallback;
   }
 }
-function repoName(repo: string): string {
-  return gh(repo, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner");
+export function parseRemoteUrl(url: string): { host: string; path: string } | null {
+  const trimmed = url.trim();
+  let host = "";
+  let path = "";
+  let match = /^https?:\/\/([^/]+)\/(.+)$/.exec(trimmed);
+  if (match) [host, path] = [match[1]!, match[2]!];
+  else if ((match = /^git@([^:]+):(.+)$/.exec(trimmed))) [host, path] = [match[1]!, match[2]!];
+  else if ((match = /^ssh:\/\/(?:git@)?([^/]+)\/(.+)$/.exec(trimmed)))
+    [host, path] = [match[1]!, match[2]!];
+  else return null;
+  path = path.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/, "");
+  return host && path ? { host: host.toLowerCase(), path } : null;
 }
-function prsForHead(repo: string, r: string, surface: string): Pull[] {
-  const text = gh(
-    repo,
-    "pr",
-    "list",
-    "--repo",
-    r,
-    "--head",
-    `train/${surface}`,
-    "--state",
-    "all",
-    "--json",
-    "number,url,state,title,createdAt,headRefOid",
-    "--limit",
-    "20",
-  );
-  return parseJson<Pull[]>(text, []).sort((a, b) =>
-    String(b.createdAt).localeCompare(String(a.createdAt)),
-  );
+
+export function resolveForge(
+  repoPath: string,
+  overrides: { ghRepo?: string; glRepo?: string } = {},
+): ForgeAddress {
+  if (overrides.ghRepo) {
+    const repo = overrides.ghRepo.replace(/^\/+|\.git$/g, "");
+    return { kind: "github", host: "github.com", repo, key: `github.com/${repo}` };
+  }
+  if (overrides.glRepo) {
+    const repo = overrides.glRepo.replace(/^\/+|\.git$/g, "");
+    return { kind: "gitlab", host: "gitlab.com", repo, key: `gitlab.com/${repo}` };
+  }
+  const raw = gitMaybe(repoPath, "config", "--get", "remote.origin.url");
+  const parsed = raw.code === 0 ? parseRemoteUrl(raw.out) : null;
+  if (parsed?.host === "github.com")
+    return { kind: "github", host: parsed.host, repo: parsed.path, key: `${parsed.host}/${parsed.path}` };
+  if (parsed?.host.includes("gitlab"))
+    return { kind: "gitlab", host: parsed.host, repo: parsed.path, key: `${parsed.host}/${parsed.path}` };
+  const forced = process.env.TRAIN_FORGE?.trim().toLowerCase();
+  if (forced === "gitlab" && parsed)
+    return { kind: "gitlab", host: parsed.host, repo: parsed.path, key: `${parsed.host}/${parsed.path}` };
+  const repo = gh(repoPath, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner");
+  return { kind: "github", host: "github.com", repo, key: `github.com/${repo}` };
+}
+
+export function gitlabCiSummary(pipeline: unknown): string {
+  if (!pipeline || typeof pipeline !== "object") return "none";
+  const status = String((pipeline as Record<string, unknown>).status ?? "").toLowerCase();
+  if (status === "success") return "1✓";
+  if (status === "failed" || status === "canceled") return "1✗";
+  if (status === "skipped") return "1↷";
+  return "1…";
+}
+
+function githubPull(raw: Record<string, unknown>): Pull {
+  const commits = Array.isArray(raw.commits) ? raw.commits : [];
+  return {
+    number: Number(raw.number), url: String(raw.url ?? ""),
+    state: String(raw.state ?? "OPEN").toUpperCase() as Pull["state"],
+    title: String(raw.title ?? ""), body: String(raw.body ?? ""),
+    createdAt: String(raw.createdAt ?? ""), headRefName: String(raw.headRefName ?? ""),
+    headRefOid: String(raw.headRefOid ?? ""), mergeable: String(raw.mergeable ?? "UNKNOWN"),
+    mergeStateStatus: String(raw.mergeStateStatus ?? "UNKNOWN"),
+    ci: ciSummary(raw.statusCheckRollup),
+    commits: commits.map((x) => ({ messageHeadline: String((x as Record<string, unknown>).messageHeadline ?? "") })),
+  };
+}
+
+function gitlabState(state: unknown): Pull["state"] {
+  const value = String(state ?? "").toLowerCase();
+  return value === "merged" ? "MERGED" : value === "closed" ? "CLOSED" : "OPEN";
+}
+function gitlabPull(raw: Record<string, unknown>, commits: Pull["commits"] = []): Pull {
+  const detail = String(raw.detailed_merge_status ?? "unknown");
+  const pending = new Set(["checking", "unchecked", "preparing", "approvals_syncing"]);
+  return {
+    number: Number(raw.iid), url: String(raw.web_url ?? ""), state: gitlabState(raw.state),
+    title: String(raw.title ?? ""), body: String(raw.description ?? ""),
+    createdAt: String(raw.created_at ?? ""), headRefName: String(raw.source_branch ?? ""),
+    headRefOid: String(raw.sha ?? ""),
+    mergeable: raw.has_conflicts ? "CONFLICTING" : pending.has(detail) ? "UNKNOWN" : "MERGEABLE",
+    mergeStateStatus: detail, ci: gitlabCiSummary(raw.head_pipeline), commits,
+  };
+}
+
+function forgeAdapter(repoPath: string, address: ForgeAddress): Forge {
+  if (address.kind === "github") {
+    const view = (number: number): Pull => githubPull(parseJson<Record<string, unknown>>(
+      gh(repoPath, "pr", "view", String(number), "--repo", address.repo, "--json",
+        "number,url,state,title,body,createdAt,mergeable,mergeStateStatus,statusCheckRollup,commits"), {},
+    ));
+    const listGithub = (state: "open" | "merged") =>
+      parseJson<Record<string, unknown>[]>(gh(repoPath, "pr", "list", "--repo", address.repo,
+        "--state", state, "--json",
+        "number,url,state,title,headRefName,createdAt,mergeable,mergeStateStatus,statusCheckRollup",
+        "--limit", "200"), []).map(githubPull);
+    return {
+      ...address, label: "#",
+      listForHead(surface) {
+        const rows = parseJson<Record<string, unknown>[]>(gh(repoPath, "pr", "list", "--repo", address.repo,
+          "--head", `train/${surface}`, "--state", "all", "--json",
+          "number,url,state,title,createdAt,headRefOid", "--limit", "20"), []);
+        return rows.map(githubPull).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      },
+      view,
+      list(state) {
+        return listGithub(state).filter((p) => p.headRefName.startsWith("train/"));
+      },
+      listOpenAll() {
+        return listGithub("open");
+      },
+      create(head, title, bodyFile) {
+        const url = gh(repoPath, "pr", "create", "--repo", address.repo, "--base", "main", "--head", head,
+          "--title", title, "--body-file", bodyFile).trim();
+        const guessed = Number(/\/(\d+)\/?$/.exec(url)?.[1]);
+        const p = view(guessed);
+        return { number: p.number, url: p.url || url };
+      },
+      edit(number, title, bodyFile) {
+        gh(repoPath, "pr", "edit", String(number), "--repo", address.repo, "--title", title, "--body-file", bodyFile);
+      },
+      close(number, comment) {
+        gh(repoPath, "pr", "close", String(number), "--repo", address.repo, "--comment", comment);
+      },
+    };
+  }
+
+  const project = encodeURIComponent(address.repo);
+  const api = (...args: string[]) => must([glabBin(), "api", "--hostname", address.host, ...args], repoPath);
+  const write = (method: "POST" | "PUT", path: string, body: Record<string, unknown>) => {
+    const parent = mkdtempSync(join(tmpdir(), "train-glab-"));
+    const input = join(parent, "input.json");
+    writeFileSync(input, JSON.stringify(body));
+    try {
+      return api("-X", method, path, "--input", input, "-H", "Content-Type: application/json");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  };
+  const view = (number: number): Pull => {
+    const raw = parseJson<Record<string, unknown>>(api(`projects/${project}/merge_requests/${number}`), {});
+    const commits = parseJson<Record<string, unknown>[]>(api(`projects/${project}/merge_requests/${number}/commits`, "--paginate"), [])
+      .map((x) => ({ messageHeadline: String(x.title ?? "") }));
+    return gitlabPull(raw, commits);
+  };
+  return {
+    ...address, label: "!",
+    listForHead(surface) {
+      const path = `projects/${project}/merge_requests?source_branch=${encodeURIComponent(`train/${surface}`)}&state=all&per_page=20&order_by=created_at&sort=desc`;
+      return parseJson<Record<string, unknown>[]>(api(path), []).map((x) => gitlabPull(x))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    },
+    view,
+    list(state) {
+      const glState = state === "open" ? "opened" : "merged";
+      return parseJson<Record<string, unknown>[]>(api(`projects/${project}/merge_requests?state=${glState}&per_page=100`, "--paginate"), [])
+        .map((x) => gitlabPull(x)).filter((p) => p.headRefName.startsWith("train/"));
+    },
+    listOpenAll() {
+      return parseJson<Record<string, unknown>[]>(api(`projects/${project}/merge_requests?state=opened&per_page=100`, "--paginate"), [])
+        .map((x) => gitlabPull(x));
+    },
+    create(head, title, bodyFile) {
+      const raw = parseJson<Record<string, unknown>>(write("POST", `projects/${project}/merge_requests`, {
+        source_branch: head, target_branch: "main", title,
+        description: readFileSync(bodyFile, "utf8"), squash: false,
+      }), {});
+      return { number: Number(raw.iid), url: String(raw.web_url ?? "") };
+    },
+    edit(number, title, bodyFile) {
+      write("PUT", `projects/${project}/merge_requests/${number}`, {
+        title, description: readFileSync(bodyFile, "utf8"),
+      });
+    },
+    close(number, comment) {
+      write("POST", `projects/${project}/merge_requests/${number}/notes`, { body: comment });
+      write("PUT", `projects/${project}/merge_requests/${number}`, { state_event: "close" });
+    },
+  };
+}
+
+function selectedForge(repo: string): Forge {
+  return forgeAdapter(repo, resolveForge(repo, {
+    ghRepo: argValue("--gh-repo"), glRepo: argValue("--gl-repo"),
+  }));
+}
+function prsForHead(forge: Forge, surface: string): Pull[] {
+  return forge.listForHead(surface);
 }
 function remoteSha(repo: string, surface: string): string | null {
   const p = gitMaybe(repo, "rev-parse", "--verify", "-q", `refs/remotes/origin/train/${surface}`);
   return p.code === 0 ? p.out.trim() : null;
 }
-function resolveTrainState(repo: string, r: string, surface: string): TrainState {
+function resolveTrainState(repo: string, forge: Forge, surface: string): TrainState {
   const remoteTip = remoteSha(repo, surface);
-  const newest = prsForHead(repo, r, surface)[0] ?? null;
+  const newest = prsForHead(forge, surface)[0] ?? null;
   const continuing = !!remoteTip && (!newest || newest.state.toUpperCase() === "OPEN");
   const fresh = !continuing;
   return {
@@ -669,6 +888,14 @@ function rebuild(
         .out.trim()
         .split(/\r?\n/)
         .filter(Boolean);
+      const staged = gitMaybe(repo, "diff", "--cached", "--name-only")
+        .out.trim()
+        .split(/\r?\n/)
+        .filter(Boolean);
+      if (!files.length && !staged.length) {
+        gitMaybe(repo, "cherry-pick", "--skip");
+        continue;
+      }
       gitMaybe(repo, "cherry-pick", "--abort");
       git(repo, "checkout", "-q", "-B", branch, original);
       refuse(conflictMessage(surface, files), 4);
@@ -703,6 +930,14 @@ interface Pending {
 const trainDir = (home: string, surface: string) => join(home, "trains", surface);
 const pendingPath = (home: string, surface: string, ref: string) =>
   join(trainDir(home, surface), `${ref}.pending.json`);
+function refuseShipHold(home: string, forge: ForgeAddress): void {
+  const path = join(home, "train-holds.json");
+  if (!existsSync(path)) return;
+  const holds = parseJson<Record<string, unknown>>(readFileSync(path, "utf8"), {});
+  const reason = holds[forge.key];
+  if (typeof reason === "string" && reason.trim())
+    refuse(`${forge.key} is on a ship hold: ${reason}. Nothing was rebased or pushed.`, 75);
+}
 function refuseOtherRepo(home: string, surface: string, repo: string): void {
   const path = join(trainDir(home, surface), "train.json");
   if (!existsSync(path)) return;
@@ -871,7 +1106,7 @@ function buildRendered(
   home: string,
   surface: string,
   openPr: Pull | null,
-  ghRepo: string,
+  forge: Forge,
   tasks: string,
   board: string,
 ): Rendered {
@@ -901,19 +1136,7 @@ function buildRendered(
   }
   let oldBody = "";
   if (openPr) {
-    const view = parseJson<Pull>(
-      gh(
-        repo,
-        "pr",
-        "view",
-        String(openPr.number),
-        "--repo",
-        ghRepo,
-        "--json",
-        "number,url,state,title,body,createdAt,mergeable,mergeStateStatus,statusCheckRollup,commits",
-      ),
-      openPr,
-    );
+    const view = forge.view(openPr.number);
     oldBody = String(view.body ?? openPr.body ?? "");
   }
   const oldSections = parseBodySections(oldBody);
@@ -977,23 +1200,25 @@ function buildRendered(
     refs: [...grouped.keys()],
     rows,
     unattributed,
-    body: renderBody(rows, unattributed, notes),
+    body: renderBody(rows, unattributed, notes, {
+      forge: forge.kind,
+      preamble: parseBodyPreamble(oldBody),
+    }),
   };
 }
-function openPrFor(repo: string, r: string, surface: string): Pull | null {
-  return prsForHead(repo, r, surface).find((p) => p.state.toUpperCase() === "OPEN") ?? null;
+function openPrFor(forge: Forge, surface: string): Pull | null {
+  return prsForHead(forge, surface).find((p) => p.state === "OPEN") ?? null;
 }
 function bodyAndPr(
   repo: string,
   home: string,
   surface: string,
-  r: string,
-  createdAt: string,
+  forge: Forge,
   tasks: string,
   board: string,
 ): { url: string; number: number; rendered: Rendered } {
-  const open = openPrFor(repo, r, surface);
-  const rendered = buildRendered(repo, home, surface, open, r, tasks, board);
+  const open = openPrFor(forge, surface);
+  const rendered = buildRendered(repo, home, surface, open, forge, tasks, board);
   const title = trainTitle(surface, rendered.refs);
   const temp = join(
     tmpdir(),
@@ -1002,50 +1227,11 @@ function bodyAndPr(
   writeFileSync(temp, rendered.body);
   try {
     if (open) {
-      gh(
-        repo,
-        "pr",
-        "edit",
-        String(open.number),
-        "--repo",
-        r,
-        "--title",
-        title,
-        "--body-file",
-        temp,
-      );
+      forge.edit(open.number, title, temp);
       return { url: open.url, number: open.number, rendered };
     }
-    const url = gh(
-      repo,
-      "pr",
-      "create",
-      "--repo",
-      r,
-      "--base",
-      "main",
-      "--head",
-      `train/${surface}`,
-      "--title",
-      title,
-      "--body-file",
-      temp,
-    ).trim();
-    const guessed = Number(/\/(\d+)\/?$/.exec(url)?.[1]);
-    const view = parseJson<Pull>(
-      gh(
-        repo,
-        "pr",
-        "view",
-        String(guessed),
-        "--repo",
-        r,
-        "--json",
-        "number,url,state,title,body,createdAt,mergeable,mergeStateStatus,statusCheckRollup,commits",
-      ),
-      { number: guessed, url, state: "OPEN", createdAt },
-    );
-    return { url: view.url || url, number: view.number, rendered };
+    const created = forge.create(`train/${surface}`, title, temp);
+    return { ...created, rendered };
   } finally {
     rmSync(temp, { force: true });
   }
@@ -1093,6 +1279,15 @@ function movePendingBase(
   }
   writeJson(pendingPath(home, p.surface, p.ref), next);
   return { pending: next, overlap };
+}
+
+// The train card is the ONE card for this MR, and members fold into it in
+// Review and Done — so it has to be rebuilt whenever its membership changes, or
+// a first ship leaves the fix on no card at all. Best-effort like `stamp`: the
+// commits are already on the PR, and a stale summary is fixed by re-running it.
+function refreshTrainCard(surface: string, tasks: string, board: string): void {
+  const r = exec(["bun", kanbanPath(), "traincard", surface, "--tasks", tasks, "--board", board]);
+  if (r.code) process.stderr.write(`warning: kanban traincard ${surface} failed: ${(r.err || r.out).trim()}\n`);
 }
 
 function stamp(slug: string, tasks: string, board: string): void {
@@ -1165,6 +1360,52 @@ function moveShippedCard(slug: string, prUrl: string, tasks: string, board: stri
   return EXIT_SHIPPED_NOT_IN_REVIEW;
 }
 
+function finalizeShip(
+  repo: string,
+  home: string,
+  surface: string,
+  forge: Forge,
+  tasks: string,
+  board: string,
+  sectionArg: string,
+  id: { slug: string; ref: string; title: string; task: Record<string, unknown> },
+  now: string,
+): number {
+  const dest = join(trainDir(home, surface), `${id.ref}.md`);
+  atomicWrite(dest, readFileSync(sectionArg, "utf8"));
+  const oldTrainPath = join(trainDir(home, surface), "train.json");
+  const oldTrain = existsSync(oldTrainPath)
+    ? parseJson<any>(readFileSync(oldTrainPath, "utf8"), {})
+    : {};
+  const provisionalRefs = Array.isArray(oldTrain.refs) ? [...oldTrain.refs] : [];
+  if (!provisionalRefs.includes(id.ref)) provisionalRefs.push(id.ref);
+  writeJson(oldTrainPath, {
+    surface,
+    repo: forge.repo,
+    pr: oldTrain.pr ?? null,
+    refs: provisionalRefs,
+    createdAt: oldTrain.createdAt ?? now,
+    updatedAt: now,
+  });
+  const pr = bodyAndPr(repo, home, surface, forge, tasks, board);
+  writeJson(oldTrainPath, {
+    surface,
+    repo: forge.repo,
+    pr: { number: pr.number, url: pr.url },
+    refs: pr.rendered.refs,
+    createdAt: oldTrain.createdAt ?? now,
+    updatedAt: now,
+  });
+  writeTaskFields(tasks, id.slug, { mrUrl: pr.url, train: surface });
+  rmSync(pendingPath(home, surface, id.ref), { force: true });
+  const reviewResult = moveShippedCard(id.slug, pr.url, tasks, board);
+  refreshTrainCard(surface, tasks, board);
+  process.stdout.write(
+    `${id.ref} shipped on train/${surface} → ${pr.url} (${pr.rendered.refs.length} fixes: ${pr.rendered.refs.join(", ")})\n`,
+  );
+  return reviewResult;
+}
+
 function ship(): number {
   const input = process.argv[3];
   const surface = argValue("--surface");
@@ -1231,8 +1472,9 @@ function ship(): number {
     refuse(`${id.ref} is already on train/${id.task.train}; drop it first`);
   const sectionPath = resolve(sectionArg);
   const wait = Number(argValue("--lock-wait") ?? 300);
-  const r = repoName(repo);
-  refuseOtherRepo(home, surface, r);
+  const forge = selectedForge(repo);
+  refuseShipHold(home, forge);
+  refuseOtherRepo(home, surface, forge.repo);
   if (surfaceUpdate !== null) atomicWrite(surfaces, surfaceUpdate);
 
   return withSurfaceLock(
@@ -1242,8 +1484,27 @@ function ship(): number {
     () => {
       git(repo, "fetch", "origin", "--prune");
 
+      const early = resolveTrainState(repo, forge, surface);
+      const earlyCommits = rangeCommits(
+        repo,
+        early.continuing ? `origin/train/${surface}` : "origin/main",
+        branch,
+      );
+      if (
+        earlyCommits.length === 0 &&
+        early.continuing &&
+        !id.task.train &&
+        refsAt(repo, early.baseTip).includes(id.ref)
+      ) {
+        process.stdout.write(
+          `${id.ref}'s commits are already ancestors of train/${surface}; nothing to rebuild or ` +
+            `push. Finishing the remaining ship steps.\n`,
+        );
+        return finalizeShip(repo, home, surface, forge, tasks, board, sectionArg, id, now);
+      }
+
       if (!verified) {
-        const state = resolveTrainState(repo, r, surface);
+        const state = resolveTrainState(repo, forge, surface);
         const commits = rangeCommits(
           repo,
           state.continuing ? `origin/train/${surface}` : "origin/main",
@@ -1264,7 +1525,7 @@ function ship(): number {
           ref: id.ref,
           slug: id.slug,
           surface,
-          repo: r,
+          repo: forge.repo,
           worktree: repo,
           branch,
           baseTip: state.baseTip,
@@ -1368,7 +1629,7 @@ function ship(): number {
       let finalState: TrainState | null = null;
       for (let attempt = 1; attempt <= 3; attempt++) {
         git(repo, "fetch", "origin", "--prune");
-        let state = resolveTrainState(repo, r, surface);
+        let state = resolveTrainState(repo, forge, surface);
         if (stateMoved(pending, state)) {
           const oldBase = pending.baseTip;
           const moved = movePendingBase(pending, state, home);
@@ -1394,7 +1655,7 @@ function ship(): number {
               repo,
               "push",
               "origin",
-              `${state.remoteTip}:refs/heads/train-closed/${surface}-${state.stale.pr.number}`,
+              `${state.remoteTip}:refs/heads/train-closed/${surface}-${forge.kind === "gitlab" ? "mr" : ""}${state.stale.pr.number}`,
             );
           }
           // A lease-guarded delete is safe only for a finished train; routine
@@ -1410,7 +1671,7 @@ function ship(): number {
           archiveTrain(
             home,
             surface,
-            String(state.stale?.pr?.number ?? now.replace(/[:.]/g, "-")),
+            `${forge.kind === "gitlab" ? "mr-" : ""}${state.stale?.pr?.number ?? now.replace(/[:.]/g, "-")}`,
             id.ref,
           );
           git(repo, "fetch", "origin", "--prune");
@@ -1425,86 +1686,21 @@ function ship(): number {
       }
 
       git(repo, "fetch", "origin", "--prune");
-      const dest = join(trainDir(home, surface), `${id.ref}.md`);
-      atomicWrite(dest, readFileSync(sectionArg, "utf8"));
-      const oldTrainPath = join(trainDir(home, surface), "train.json");
-      const oldTrain = existsSync(oldTrainPath)
-        ? parseJson<any>(readFileSync(oldTrainPath, "utf8"), {})
-        : {};
-      const provisionalRefs = Array.isArray(oldTrain.refs) ? [...oldTrain.refs] : [];
-      if (!provisionalRefs.includes(id.ref)) provisionalRefs.push(id.ref);
-      writeJson(oldTrainPath, {
-        surface,
-        repo: r,
-        pr: oldTrain.pr ?? null,
-        refs: provisionalRefs,
-        createdAt: oldTrain.createdAt ?? now,
-        updatedAt: now,
-      });
-      const pr = bodyAndPr(repo, home, surface, r, now, tasks, board);
-      writeJson(oldTrainPath, {
-        surface,
-        repo: r,
-        pr: { number: pr.number, url: pr.url },
-        refs: pr.rendered.refs,
-        createdAt: oldTrain.createdAt ?? now,
-        updatedAt: now,
-      });
-      writeTaskFields(tasks, id.slug, { mrUrl: pr.url, train: surface });
-      rmSync(pp, { force: true });
-      const reviewResult = moveShippedCard(id.slug, pr.url, tasks, board);
-      process.stdout.write(
-        `${id.ref} shipped on train/${surface} → ${pr.url} (${pr.rendered.refs.length} fixes: ${pr.rendered.refs.join(", ")})\n`,
-      );
-      return reviewResult;
+      return finalizeShip(repo, home, surface, forge, tasks, board, sectionArg, id, now);
     },
     wait,
     now,
   );
 }
 
-function allPrs(repo: string, r: string, state: "open" | "merged"): Pull[] {
-  return parseJson<Pull[]>(
-    gh(
-      repo,
-      "pr",
-      "list",
-      "--repo",
-      r,
-      "--state",
-      state,
-      "--json",
-      "number,url,state,title,headRefName,createdAt,mergeable,mergeStateStatus,statusCheckRollup",
-      "--limit",
-      "200",
-    ),
-    [],
-  ).filter((p) => p.headRefName?.startsWith("train/"));
-}
-function prView(repo: string, r: string, n: number): Pull {
-  return parseJson<Pull>(
-    gh(
-      repo,
-      "pr",
-      "view",
-      String(n),
-      "--repo",
-      r,
-      "--json",
-      "number,url,state,title,body,createdAt,mergeable,mergeStateStatus,statusCheckRollup,commits",
-    ),
-    null as never,
-  );
-}
 function prRefs(p: Pull): string[] {
-  const commits = Array.isArray(p.commits) ? (p.commits as Array<Record<string, unknown>>) : [];
   const refs: string[] = [];
   const add = (ref: string | null) => {
     if (ref && !refs.includes(ref)) refs.push(ref);
   };
   for (const ref of parseBodyTable(String(p.body ?? "")).keys()) add(ref);
   for (const ref of parseBodySections(String(p.body ?? "")).keys()) add(ref);
-  for (const commit of commits) add(commitRef(String(commit.messageHeadline ?? "")));
+  for (const commit of p.commits) add(commitRef(commit.messageHeadline));
   return refs;
 }
 
@@ -1522,8 +1718,9 @@ function drop(): number {
     argValue("--surface") ?? (typeof id.task.train === "string" ? id.task.train : undefined);
   if (!surface) refuse(`${id.ref} has no train; pass --surface <key>`);
   const wait = Number(argValue("--lock-wait") ?? 300);
-  const r = repoName(repo);
-  refuseOtherRepo(home, surface, r);
+  const forge = selectedForge(repo);
+  refuseShipHold(home, forge);
+  refuseOtherRepo(home, surface, forge.repo);
 
   return withSurfaceLock(
     home,
@@ -1531,7 +1728,7 @@ function drop(): number {
     id.ref,
     () => {
       git(repo, "fetch", "origin", "--prune");
-      const open = openPrFor(repo, r, surface);
+      const open = openPrFor(forge, surface);
       const oldTip = remoteSha(repo, surface);
       if (!oldTip || !open) refuse(`train/${surface} has no remote branch and OPEN PR`);
 
@@ -1592,27 +1789,18 @@ function drop(): number {
       const trainPath = join(dir, "train.json");
       const state = existsSync(trainPath)
         ? parseJson<any>(readFileSync(trainPath, "utf8"), {})
-        : { surface, repo: r, refs: [] };
+        : { surface, repo: forge.repo, refs: [] };
       state.refs = (Array.isArray(state.refs) ? state.refs : []).filter(
         (x: string) => x !== id.ref,
       );
       state.updatedAt = now;
 
       if (keep.length) {
-        const edited = bodyAndPr(repo, home, surface, r, now, tasks, board);
+        const edited = bodyAndPr(repo, home, surface, forge, tasks, board);
         state.refs = edited.rendered.refs;
         state.pr = { number: edited.number, url: edited.url };
       } else {
-        gh(
-          repo,
-          "pr",
-          "close",
-          String(open.number),
-          "--repo",
-          r,
-          "--comment",
-          `Emptied by train.ts drop ${id.ref}.`,
-        );
+        forge.close(open.number, `Emptied by train.ts drop ${id.ref}.`);
         state.pr = null;
       }
       writeJson(trainPath, state);
@@ -1623,6 +1811,7 @@ function drop(): number {
         process.stderr.write((moved.err || moved.out).trim() + "\n");
         return 1;
       }
+      if (state.pr) refreshTrainCard(surface, tasks, board);
       process.stdout.write(
         `${id.ref} dropped from train/${surface}: ${removed.length} commit(s) ${removed.map(short).join(", ")}. Its own branch still holds its commits.\n`,
       );
@@ -1633,31 +1822,175 @@ function drop(): number {
   );
 }
 
-function landedNumbers(home: string, surface: string): number[] {
+function landedEntries(home: string, surface: string): Array<number | string> {
   const p = join(trainDir(home, surface), "landed.json");
-  return existsSync(p) ? parseJson<number[]>(readFileSync(p, "utf8"), []) : [];
+  return existsSync(p) ? parseJson<Array<number | string>>(readFileSync(p, "utf8"), []) : [];
+}
+
+function moveTrain(): number {
+  const surface = process.argv[3];
+  if (!surface || surface.startsWith("--") || !SURFACE_RE.test(surface))
+    refuse("usage: train.ts move <surface> [--from-remote github] [--dry-run] [--repo <checkout>]", 64);
+  const repo = resolve(argValue("--repo") ?? DEFAULT_REPO);
+  const home = argValue("--home") ?? join(homedir(), ".claude/om-bug-loop");
+  const tasks = argValue("--tasks") ?? DEFAULT_TASKS;
+  const board = argValue("--board") ?? DEFAULT_BOARD;
+  const from = argValue("--from-remote") ?? "github";
+  const dryRun = process.argv.includes("--dry-run");
+  const now = argValue("--now") ?? new Date().toISOString();
+  const destinationAddress = resolveForge(repo);
+  if (destinationAddress.kind !== "gitlab")
+    refuse("move destination origin must be a GitLab repository", 64);
+  const sourceRaw = gitMaybe(repo, "config", "--get", `remote.${from}.url`);
+  const parsedSource = sourceRaw.code === 0 ? parseRemoteUrl(sourceRaw.out) : null;
+  if (!parsedSource || parsedSource.host !== "github.com")
+    refuse(`move source remote ${from} must point to github.com`, 64);
+  const sourceAddress: ForgeAddress = {
+    kind: "github", host: parsedSource.host, repo: parsedSource.path,
+    key: `${parsedSource.host}/${parsedSource.path}`,
+  };
+  const destination = forgeAdapter(repo, destinationAddress);
+  const source = forgeAdapter(repo, sourceAddress);
+
+  return withSurfaceLock(home, surface, "move", () => {
+    git(repo, "fetch", from, "--prune");
+    git(repo, "fetch", "origin", "--prune");
+    const sourcePr = source.listForHead(surface).find((p) => p.state === "OPEN");
+    if (!sourcePr) refuse(`GitHub has no OPEN PR for train/${surface}`);
+    const sourcePull = source.view(sourcePr.number);
+    const sourceTip = gitMaybe(repo, "rev-parse", "--verify", "-q", `refs/remotes/${from}/train/${surface}`);
+    if (sourceTip.code || sourceTip.out.trim() !== sourcePr.headRefOid)
+      refuse(`GitHub branch moved for train/${surface}`);
+    const range = `${from}/main..${from}/train/${surface}`;
+    const merges = git(repo, "rev-list", "--merges", range).split(/\s+/).filter(Boolean);
+    if (merges.length) refuse(`refusing to move a range containing merge commits: ${merges.join(", ")}`);
+    const commits = git(repo, "rev-list", "--reverse", "--no-merges", range)
+      .split(/\s+/).filter(Boolean);
+    const refs = [...new Set(commits.map((sha) => commitRef(commitInfo(repo, sha).subject)).filter((x): x is string => !!x))];
+
+    const collisions = destination.listOpenAll().filter((p) =>
+      p.headRefName !== `train/${surface}` && p.body.includes(sourcePull.url));
+    if (collisions.length)
+      refuse(`source PR is already referenced by ${collisions.map((p) => `!${p.number} (${p.headRefName})`).join(", ")}`);
+
+    const adopted = destination.listForHead(surface).find((p) => p.state === "OPEN") ?? null;
+    const stale = remoteSha(repo, surface);
+    let mode = "as-is";
+    let rebuildNeeded = false;
+    const sourceBase = git(repo, "merge-base", `${from}/main`, `${from}/train/${surface}`);
+    if (gitMaybe(repo, "merge-base", "--is-ancestor", sourceBase, "origin/main").code !== 0) {
+      mode = "rebuild";
+      rebuildNeeded = true;
+    }
+    if (adopted) {
+      if (!stale) refuse(`GitLab MR !${adopted.number} has no origin train/${surface} branch`);
+      const destinationRefs = refsAt(repo, stale);
+      const destinationRefSet = new Set(destinationRefs);
+      if (destinationRefSet.size !== refs.length || refs.some((ref) => !destinationRefSet.has(ref)))
+        refuse(`GitLab MR !${adopted.number} refs ${destinationRefs.join(", ") || "—"} do not match GitHub refs ${refs.join(", ") || "—"}`);
+    }
+
+    const allTasks = parseJson<Record<string, Record<string, unknown>>>(readFileSync(tasks, "utf8"), {});
+    const affected = Object.entries(allTasks).filter(([, task]) =>
+      task.train === surface || task.mrUrl === sourcePull.url);
+    const staleName = stale ? `train-stale/${surface}-${short(stale)}` : null;
+    if (dryRun) {
+      process.stdout.write([
+        `source: #${sourcePull.number} ${sourcePull.url}`,
+        `commits: ${commits.length}`,
+        `destination: ${adopted ? `adopt !${adopted.number}` : "create"}`,
+        `history: ${mode}`,
+        ...(staleName && !adopted ? [`archive: ${staleName}`] : []),
+        `tasks: ${affected.map(([, task]) => String(task.ref ?? task.slug ?? "?")).join(", ") || "none"}`,
+      ].join("\n") + "\n");
+      return 0;
+    }
+
+    let mr = adopted ? { number: adopted.number, url: adopted.url } : null;
+    if (!mr) {
+      let tip = sourceTip.out.trim();
+      let parent: string | null = null;
+      let wt: string | null = null;
+      let added = false;
+      try {
+        if (rebuildNeeded) {
+          parent = mkdtempSync(join(tmpdir(), "train-move-"));
+          wt = join(parent, "worktree");
+          git(repo, "worktree", "add", "--detach", wt, "origin/main");
+          added = true;
+          for (const sha of commits) {
+            const pick = gitCommitMaybe(wt, "cherry-pick", "-x", sha);
+            if (pick.code) {
+              const files = gitMaybe(wt, "diff", "--name-only", "--diff-filter=U")
+                .out.trim().split(/\r?\n/).filter(Boolean);
+              gitMaybe(wt, "cherry-pick", "--abort");
+              refuse(`move conflict in: ${files.join(", ") || "(unknown paths)"}`, 4);
+            }
+          }
+          tip = git(wt, "rev-parse", "HEAD");
+        }
+        if (stale) git(repo, "push", "origin", `${stale}:refs/heads/${staleName}`);
+        const push = gitMaybe(repo, "push",
+          `--force-with-lease=refs/heads/train/${surface}:${stale ?? ""}`,
+          "origin", `${tip}:refs/heads/train/${surface}`);
+        if (push.code) refuse((push.err || push.out).trim());
+      } finally {
+        if (added && wt) gitMaybe(repo, "worktree", "remove", "--force", wt);
+        if (parent) rmSync(parent, { recursive: true, force: true });
+      }
+      const bodyParent = mkdtempSync(join(tmpdir(), "train-move-body-"));
+      const bodyFile = join(bodyParent, "body.md");
+      writeFileSync(bodyFile, `Moved from GitHub: ${sourcePull.url}\n\n${sourcePull.body}`);
+      try {
+        mr = destination.create(`train/${surface}`, sourcePull.title, bodyFile);
+      } finally {
+        rmSync(bodyParent, { recursive: true, force: true });
+      }
+    }
+
+    source.close(sourcePull.number, `Moved to GitLab: ${mr.url}`);
+    const trainPath = join(trainDir(home, surface), "train.json");
+    const oldTrain = existsSync(trainPath)
+      ? parseJson<Record<string, unknown>>(readFileSync(trainPath, "utf8"), {}) : {};
+    writeJson(trainPath, {
+      surface, repo: destination.repo, pr: { number: mr.number, url: mr.url }, refs,
+      createdAt: oldTrain.createdAt ?? now, updatedAt: now,
+      movedFrom: { repo: source.repo, number: sourcePull.number, url: sourcePull.url },
+    });
+    for (const [slug] of affected)
+      writeTaskFields(tasks, slug, { mrUrl: mr.url, train: surface });
+    for (const [slug] of affected) stamp(slug, tasks, board);
+    refreshTrainCard(surface, tasks, board);
+    process.stdout.write(`train/${surface}: moved #${sourcePull.number} → !${mr.number} ${mr.url} (${affected.length} tasks)\n`);
+    return 0;
+  }, Number(argValue("--lock-wait") ?? 300), now);
+}
+
+function pullLanded(home: string, surface: string, forge: Forge, pull: Pull): boolean {
+  const entries = landedEntries(home, surface);
+  return entries.includes(pull.url) || (forge.kind === "github" && entries.includes(pull.number));
 }
 function status(): number {
   const home = argValue("--home") ?? join(homedir(), ".claude/om-bug-loop");
   const repo = resolve(argValue("--repo") ?? DEFAULT_REPO);
   const now = new Date(argValue("--now") ?? new Date().toISOString()).getTime();
-  const r = argValue("--gh-repo") ?? repoName(repo);
-  const open = allPrs(repo, r, "open").sort((a, b) => a.headRefName!.localeCompare(b.headRefName!));
+  const forge = selectedForge(repo);
+  const open = forge.list("open").sort((a, b) => a.headRefName.localeCompare(b.headRefName));
 
   if (!open.length) process.stdout.write("no open trains\n");
   for (const listed of open) {
-    const p = prView(repo, r, listed.number);
-    const surface = listed.headRefName!.slice(6);
+    const p = forge.view(listed.number);
+    const surface = listed.headRefName.slice(6);
     process.stdout.write(
-      `${surface}  #${p.number}  ${humanDuration(now - new Date(p.createdAt).getTime())}  ${p.mergeable}/${p.mergeStateStatus}  CI ${ciSummary(p.statusCheckRollup)}  ${prRefs(p).join(", ") || "—"}  ${p.url}\n`,
+      `${surface}  ${forge.label}${p.number}  ${humanDuration(now - new Date(p.createdAt).getTime())}  ${p.mergeable}/${p.mergeStateStatus}  CI ${p.ci}  ${prRefs(p).join(", ") || "—"}  ${p.url}\n`,
     );
   }
 
-  for (const p of allPrs(repo, r, "merged")) {
-    const surface = p.headRefName!.slice(6);
-    if (!landedNumbers(home, surface).includes(p.number))
+  for (const p of forge.list("merged")) {
+    const surface = p.headRefName.slice(6);
+    if (!pullLanded(home, surface, forge, p))
       process.stdout.write(
-        `merged, not landed: ${surface} #${p.number} — run: bun train.ts landed\n`,
+        `merged, not landed: ${surface} ${forge.label}${p.number} — run: bun train.ts landed\n`,
       );
   }
   return 0;
@@ -1670,18 +2003,18 @@ function landed(): number {
   const board = argValue("--board") ?? DEFAULT_BOARD;
   const repo = resolve(argValue("--repo") ?? DEFAULT_REPO);
   const now = argValue("--now") ?? new Date().toISOString();
-  const r = argValue("--gh-repo") ?? repoName(repo);
+  const forge = selectedForge(repo);
   let failed = 0;
 
-  for (const listed of allPrs(repo, r, "merged").sort((a, b) => a.number - b.number)) {
-    const surface = listed.headRefName!.slice(6);
-    if (landedNumbers(home, surface).includes(listed.number)) continue;
+  for (const listed of forge.list("merged").sort((a, b) => a.number - b.number)) {
+    const surface = listed.headRefName.slice(6);
+    if (pullLanded(home, surface, forge, listed)) continue;
     withSurfaceLock(
       home,
       surface,
-      `PR#${listed.number}`,
+      `${forge.label}${listed.number}`,
       () => {
-        const p = prView(repo, r, listed.number);
+        const p = forge.view(listed.number);
         const refs = prRefs(p);
         let moved = 0;
         let errors = 0;
@@ -1708,15 +2041,18 @@ function landed(): number {
           process.stdout.write(`${ref} → Done\n`);
           moved++;
         }
-        const numbers = landedNumbers(home, surface);
-        if (!numbers.includes(p.number)) numbers.push(p.number);
-        writeJson(join(trainDir(home, surface), "landed.json"), numbers);
+        const entries = landedEntries(home, surface);
+        const landedKey = forge.kind === "github" ? p.number : p.url;
+        if (!entries.includes(landedKey)) entries.push(landedKey);
+        writeJson(join(trainDir(home, surface), "landed.json"), entries);
+        if (moved) refreshTrainCard(surface, tasks, board);
         const trainPath = join(trainDir(home, surface), "train.json");
         if (existsSync(trainPath)) {
           const state = parseJson<any>(readFileSync(trainPath, "utf8"), {});
-          if (state.pr?.number === p.number) archiveTrain(home, surface, String(p.number));
+          if (state.pr?.number === p.number)
+            archiveTrain(home, surface, `${forge.kind === "gitlab" ? "mr-" : ""}${p.number}`);
         }
-        process.stdout.write(`train/${surface} #${p.number}: ${moved} moved, ${errors} failed\n`);
+        process.stdout.write(`train/${surface} ${forge.label}${p.number}: ${moved} moved, ${errors} failed\n`);
       },
       Number(argValue("--lock-wait") ?? 300),
       now,
@@ -1730,9 +2066,10 @@ export function main(): number {
     const command = process.argv[2];
     if (command === "ship") return ship();
     if (command === "drop") return drop();
+    if (command === "move") return moveTrain();
     if (command === "status") return status();
     if (command === "landed") return landed();
-    refuse("usage: train.ts <ship|drop|status|landed> ...", 64);
+    refuse("usage: train.ts <ship|drop|move|status|landed> ...", 64);
   } catch (e) {
     if (e instanceof Stop) {
       process.stderr.write(`${e.message}\n`);

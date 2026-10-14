@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nicholas.om-kanban-rotate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nicholas/.local/bin/om-kanban-rotate</string>
+  </array>
+  <!-- 23:30 Sunday (Weekday 0), NOT Monday 00:00.
+       com.nicholas.midnight-scout fires at Hour 0 / Minute 0 on Weekdays 1-6
+       and spends up to 8 hours filing cards into `todo` on the same
+       Kanban.md. launchd gives no ordering guarantee between two agents, so a
+       Monday-00:00 rotation would be a concurrent read-modify-write on one
+       file. 30 minutes of separation also means the scout's Monday cards land
+       on the fresh board rather than in the archived week. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>23</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <!-- claude and python3 live outside launchd's default PATH, which is just
+       /usr/bin:/bin:/usr/sbin:/sbin. The script re-exports its own too. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/nicholas/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/nicholas/.claude/kanban-rotate/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nicholas/.claude/kanban-rotate/logs/launchd.err</string>
+</dict>
+</plist>

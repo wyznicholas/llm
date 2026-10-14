@@ -1,8 +1,8 @@
-# Trains — batch PRs by surface
+# Trains — batch PRs and MRs by surface
 
 *Read by `om-task`, `om-feature` and the coordinator. `SKILL.md` carries the policy; this file carries the conventions and the commands. If the two disagree, `SKILL.md` wins and this one is the bug.*
 
-**An owner no longer opens its own PR.** It verifies on its own branch exactly as before, then ships its commits onto the open batch PR for its surface — a **train** — with `train.ts ship`. Its terminal state is *"my commits are on an open batch PR"*, not *"my PR is open"*.
+**An owner no longer opens its own PR or MR.** It verifies on its own branch exactly as before, then ships its commits onto the open batch review for its surface — a **train** — with `train.ts ship`. Its terminal state is *"my commits are on an open batch review"*, not *"my PR/MR is open"*.
 
 ## Why
 
@@ -19,17 +19,67 @@ These are fixed. Other agents built the first trains by hand with them, so `trai
 | thing | convention |
 |---|---|
 | branch | `train/<surface>`, off `origin/main`, one per surface |
-| PR | one open batch PR per branch, base `main` |
+| review | one open batch PR/MR per branch, base `main` |
 | title | `train(<surface>): <n> fixes — <refs>` — e.g. `train(sidebar): 2 fixes — T167, F33` |
-| merge method | **Rebase and merge.** The repo allows it and merge commits are disabled |
+| merge method | GitHub: **Rebase and merge**. GitLab: fast-forward (project `merge_method: ff`); press Rebase first if asked, never squash |
 | commits | every commit's subject starts with its ref (`T167 fix(sidebar): …`). `train.ts` adds the prefix if Codex did not |
-| body | first line says *Rebase and merge*; then a table — fix, ref, files, lines ±, verifier verdict, how to try; then one `## <ref> · <title>` section per fix |
+| body | first line names the host's merge method; then a table — fix, ref, files, lines ±, verifier verdict, how to try; then one `## <ref> · <title>` section per fix |
 | ledger | the task's `tasks.json` entry gains `"train": "<surface>"`, and `mrUrl` is the batch PR's URL |
 | surfaces | [[kanban/references/train-surfaces|train-surfaces]] — edit it freely; `train.ts` reads it |
 
 **Why rebase-and-merge and ref-prefixed subjects.** A squash would fuse five fixes into one commit, and the first one that turns out wrong would take the other four out with it. Rebased commits land on `main` individually, each carrying its ref, so `git log --grep '^T167'` finds exactly one fix and `git revert` of those commits removes it alone.
 
 **Pick the surface by the file most of the diff lives in**, not by where the symptom showed. The point is that PRs on the same files stop conflicting with each other.
+
+## Forges
+
+The forge follows the raw URL of `origin`, so git pushes and review operations
+cannot split across hosts. `github.com` uses `gh`; a host containing `gitlab`
+uses `glab api`. Local-path and other origins keep the old `gh repo view`
+fallback. `--gh-repo <owner/name>` explicitly selects GitHub;
+`--gl-repo <group/path>` explicitly selects GitLab. The web surfaces ship to
+`gitlab.com/openmarketxyz/frontend/openmarket-chat`; `openmarket-internal-*`
+surfaces stay on GitHub, and `mobile-*` surfaces use the GitLab
+`openmarket-chat-app` project.
+
+### What does not map
+
+The normalized fields shown by `status`, and the host constraints around them,
+map like this:
+
+| GitHub | GitLab | fit |
+|---|---|---|
+| `mergeable` | `has_conflicts` + `detailed_merge_status` | derived faithfully |
+| `mergeStateStatus` | `detailed_merge_status` | different vocabulary, shown verbatim |
+| one CI mark per check run | one mark for `head_pipeline.status` | does not map; inspect pipeline jobs for per-job detail |
+| Rebase and merge | project `merge_method: ff` | equivalent individual commits, but GitLab may require Rebase first; never squash |
+| CI did not gate merges | green pipeline required; skipped is not allowed | new GitLab constraint |
+| approvals did not gate | `not_approved` blocks merge | new GitLab constraint |
+| — | source branch deleted after merge | new GitLab constraint; the next train starts fresh |
+| `#945` | `!34` | label only |
+
+These are host constraints, not GitHub status fields in disguise.
+
+`<home>/train-holds.json` can stop writes to one forge-qualified repository:
+
+```json
+{"gitlab.com/openmarketxyz/frontend/openmarket-chat":"main is being synchronized"}
+```
+
+Both calls to `ship` and `drop` exit 75 before the surface lock, fetch, rebuild
+or push. `status`, `landed` and `move` ignore holds.
+
+When an existing train must move from the retained `github` remote to a GitLab
+`origin`, preview and execute it with:
+
+```bash
+bun …/train.ts move <surface> --from-remote github --dry-run
+bun …/train.ts move <surface> --from-remote github
+```
+
+The dry run fetches and reads only. The real move adopts a matching open MR or
+rebuilds the GitHub commits on GitLab `main`, archives a stale destination
+branch, opens the MR, closes the GitHub PR, and repoints the ledger and cards.
 
 ## The owner's ship step
 
@@ -82,7 +132,7 @@ The owner has already verified on its own branch — the verifier's PASS, the ca
 | 5 | shipped, but the card is **not** in `Review` — the Review gate (or `stage`/`status`) refused; fix what it printed, then run `kanban.ts upsert <slug> --column Review`. Do not ship again |
 | 3 | rebased, not shipped — run the printed re-verify command, then `--verified` |
 | 4 | conflict — your branch is restored untouched; rebase it onto `origin/train/<surface>` yourself (a hand step, unless the hunk is inside the fix's own logic, which goes to Codex) and ship again |
-| 75 | the surface lock is held, or stale — the message names the pid, ref and file |
+| 75 | the surface lock is held/stale, or the repository is on a ship hold — the message names the lock or hold reason |
 | 1 / 64 | refused / usage — the message says what to fix |
 
 A **new surface**: `train.ts ship` refuses a key not in [[kanban/references/train-surfaces|train-surfaces]] and lists the known ones. Pass `--new-surface "<what it covers>"` once and the key is added to the list.
@@ -104,6 +154,13 @@ It rebuilds the train without that ref's commits and pushes with `--force-with-l
 ```bash
 bun …/train.ts status    # every open train: PR, age, mergeable state, CI, refs
 bun …/train.ts landed    # a merged train moves EVERY ref on it to Done
+```
+
+For GitHub PRs that merged before the openmarket-chat move, land them against
+their original forge explicitly:
+
+```bash
+bun …/train.ts landed --gh-repo openmarket-xyz/openmarket-chat
 ```
 
 **A merged batch PR moves every ref on it to `Done`**, not just the one whose card you happen to be looking at — that is what `landed` is for. It reads the refs off the merged PR's commits, so trains built by hand land too; it skips refs this pipeline does not own (`C<n>`), and it is idempotent. `status` flags any merged train not yet landed.

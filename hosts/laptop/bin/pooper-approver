@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""Approve every GitHub PR link posted in the OM Chat group DM "THE POOPERS".
+
+Design doc: ~/Documents/Obsidian Vault/Architecture Planning/PR Auto-Approver.md
+Tests:      python3 ~/.local/share/pooper-approver/test_pooper_approver.py
+
+WHY THIS EXISTS: the team ships ~15 PRs/day and posts each one into a group DM;
+approvals were the bottleneck. The operator asked for unconditional approval of
+every posted link and explicitly declined a review gate (CI status, diff scope, a
+Claude review pass) after being told that this lets any of the 7 other DM members
+spend an approval on any repo this account can reach. That trade is a recorded
+decision, so DO NOT reintroduce quality gates here — the `PAUSE` file is the
+agreed brake.
+
+WHY REST RATHER THAN THE `om` CLI: group DMs are addressed by conversation id and
+the CLI has no path to them. `om room dm` is username-only, group ids are not
+room-addressable, and the `om room dm group …` subcommands the action docs
+advertise are not wired into the binary (checked v0.145.0).
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from collections import namedtuple
+from datetime import datetime, timezone
+from pathlib import Path
+
+Link = namedtuple("Link", "forge path number")
+
+STATE = Path.home() / ".local" / "state" / "pooper-approver"
+# Overridable so the fatal auth path can be exercised without touching the real
+# credential store.
+CREDENTIALS = Path(
+    os.environ.get("OM_CREDENTIALS", str(Path.home() / ".openmarket" / "credentials.json"))
+)
+
+CONVERSATION_ID = os.environ.get("CONVERSATION_ID", "6a754be9b83326f96c4eb5f7")
+CHAT_API_URL = os.environ.get("CHAT_API_URL", "https://chat.openmarket.xyz/chat").rstrip("/")
+POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "30"))
+# Catch-up is bounded by AGE, with the page count only as a runaway backstop. A
+# page bound alone silently drops the window between the mark and the oldest page
+# read, which after an outage means posted links are never approved and nothing
+# says so.
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "40"))
+MAX_BACKFILL_DAYS = float(os.environ.get("MAX_BACKFILL_DAYS", "7"))
+PAGE_LIMIT = int(os.environ.get("PAGE_LIMIT", "50"))
+MAX_APPROVALS_PER_CYCLE = int(os.environ.get("MAX_APPROVALS_PER_CYCLE", "20"))
+DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
+
+APPROVAL_BODY = (
+    "Approved automatically by `pooper-approver` because this PR was linked in "
+    "THE POOPERS. No human read this diff."
+)
+
+# Exit codes: distinct so launchd logs say *which* wall we hit.
+EX_CONFIG = 78
+EX_AUTH = 77
+
+
+class ConfigError(Exception):
+    pass
+
+
+class AuthError(Exception):
+    """The chat API rejected our credentials.
+
+    Its own class because it is the one failure that must stop the daemon rather
+    than be retried: a silently expired key looks exactly like a quiet channel,
+    which would make this thing appear to work forever while approving nothing.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Pure logic (unit-tested)
+# ---------------------------------------------------------------------------
+
+# The number is captured as \d+, so trailing punctuation in prose — the observed
+# real message "(see .../pull/487)" — falls outside the group naturally.
+GITHUB_RE = re.compile(
+    r"https?://(?:www\.)?github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)"
+)
+# Non-greedy path so subgroups (grp/sub/proj) survive but the `/-/` separator
+# still terminates it.
+GITLAB_RE = re.compile(
+    r"https?://(?:www\.)?gitlab\.com/([A-Za-z0-9._/-]+?)/-/merge_requests/(\d+)"
+)
+
+
+def extract_links(content):
+    """Every distinct PR/MR link in one message, in order of appearance.
+
+    Both forges are matched so "approve every MR" holds literally if a GitLab
+    link ever appears here; in ~700 messages of history none ever has.
+    """
+    found = []
+    for forge, pattern in (("github", GITHUB_RE), ("gitlab", GITLAB_RE)):
+        for match in pattern.finditer(content or ""):
+            found.append((match.start(), Link(forge, match.group(1), int(match.group(2)))))
+    found.sort(key=lambda pair: pair[0])
+
+    seen, ordered = set(), []
+    for _, link in found:
+        if link not in seen:
+            seen.add(link)
+            ordered.append(link)
+    return ordered
+
+
+def ledger_key(link):
+    """Forge-qualified so o/r#1 on GitHub and GitLab cannot collide."""
+    return f"{link.forge}:{link.path}#{link.number}"
+
+
+def load_ledger(path):
+    """The ledger, or {} if it is missing or unreadable.
+
+    Tolerating corruption matters more than noticing it: a half-written ledger
+    that raised would wedge the daemon permanently, whereas an empty one costs at
+    most some already-approved PRs being re-attempted and skipped.
+    """
+    try:
+        data = json.loads(Path(path).read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def record_ledger(path, key, outcome):
+    """Record a terminal decision. Written via replace() so a crash mid-write
+    cannot leave a truncated ledger behind."""
+    path = Path(path)
+    ledger = load_ledger(path)
+    ledger[key] = {"outcome": outcome, "at": datetime.now(timezone.utc).isoformat()}
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(ledger, indent=1, sort_keys=True))
+    tmp.replace(path)
+
+
+def parse_ts(value):
+    """Epoch milliseconds from either the ISO `timestamp` or a numeric one.
+
+    Junk yields 0 rather than raising: one malformed message must not be able to
+    stop the poll loop.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    if not isinstance(value, str):
+        return 0
+    try:
+        text = value.strip().replace("Z", "+00:00")
+        return int(datetime.fromisoformat(text).timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def messages_after(messages, mark):
+    """Messages strictly newer than `mark`, oldest first.
+
+    Strictly, because an inclusive compare would reprocess the newest message of
+    every cycle forever. Oldest-first so approvals happen in posting order.
+    """
+    fresh = [m for m in messages if parse_ts(m.get("timestamp")) > mark]
+    return sorted(fresh, key=lambda m: parse_ts(m.get("timestamp")))
+
+
+def newest_ts(messages):
+    return max((parse_ts(m.get("timestamp")) for m in messages), default=0)
+
+
+def should_page_back(oldest_in_page, mark, has_more, pages_done, max_pages, floor_ms=0):
+    """Whether to fetch an older page.
+
+    Stops on any of: no more history, reaching the mark, reaching the age floor,
+    or the runaway page backstop.
+    """
+    if not has_more or pages_done >= max_pages:
+        return False
+    if oldest_in_page <= mark or oldest_in_page <= floor_ms:
+        return False
+    return True
+
+
+def gap_skipped(oldest_read, mark, has_more, pages_done, max_pages, floor_ms=0):
+    """Did we stop with recent, unread messages still behind us?
+
+    True only for the runaway-backstop case. Reaching the mark means we are
+    caught up; running out of history means there is nothing more; stopping at
+    the age floor is a deliberate policy rather than data loss.
+    """
+    if not has_more or pages_done < max_pages:
+        return False
+    return oldest_read > mark and oldest_read > floor_ms
+
+
+def pick_api_key(creds):
+    active = (creds or {}).get("active")
+    for key in (creds or {}).get("keys") or []:
+        if key.get("keyId") == active and key.get("apiKey"):
+            return key["apiKey"]
+    raise ConfigError(
+        f"no apiKey in {CREDENTIALS} matching active id {active!r} — run `om login`"
+    )
+
+
+# Substrings that mean "this will never succeed". Everything else is treated as
+# transient: retrying a mystery is safer than silently never trying again.
+TERMINAL_MARKERS = (
+    "can not approve your own",
+    "cannot approve your own",
+    "can not approve own",
+    "pull request is closed",
+    "pull request is merged",
+    "could not resolve to a",
+    "already approved",
+    "no linked branch",
+)
+
+
+def is_terminal_failure(stderr):
+    low = (stderr or "").lower()
+    return any(marker in low for marker in TERMINAL_MARKERS)
+
+
+def skip_reason(meta, me):
+    """Why this PR can never be approved, or None.
+
+    These are platform limits, not policy: GitHub refuses self-approval (and the
+    operator posts their own PRs), and reviewing a closed or merged PR errors.
+    Drafts are deliberately NOT skipped — GitHub permits reviewing them and no
+    review gate was requested.
+    """
+    author = ((meta or {}).get("author") or {}).get("login") or ""
+    state = ((meta or {}).get("state") or "").upper()
+    if author.lower() == (me or "").lower():
+        return "self-authored"
+    if state == "MERGED":
+        return "merged"
+    if state == "CLOSED":
+        return "closed"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# I/O
+# ---------------------------------------------------------------------------
+
+
+def log(message):
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    line = f"{stamp} {message}"
+    STATE.mkdir(parents=True, exist_ok=True)
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with (STATE / f"{day}.log").open("a") as handle:
+        handle.write(line + "\n")
+    print(line, flush=True)
+
+
+def api_key():
+    try:
+        creds = json.loads(CREDENTIALS.read_text())
+    except Exception as error:
+        raise ConfigError(f"cannot read {CREDENTIALS}: {error}") from error
+    return pick_api_key(creds)
+
+
+def fetch_page(key, before=None):
+    url = f"{CHAT_API_URL}/dms/conversations/{CONVERSATION_ID}/history?limit={PAGE_LIMIT}"
+    if before:
+        url += f"&before={before}"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise AuthError(
+                f"chat API returned {error.code} — the om device key expires "
+                "2026-09-17; re-run `om login` and reload the job"
+            ) from error
+        raise
+
+
+def collect_new_messages(key, mark):
+    """Messages newer than `mark`, oldest first, plus whether a gap was skipped.
+
+    Pages backwards until caught up to the mark, so a burst larger than one page
+    is not dropped. Bounded by age rather than page count — see MAX_PAGES.
+    """
+    floor_ms = int((time.time() - MAX_BACKFILL_DAYS * 86400) * 1000)
+    collected, before, pages = [], None, 0
+    oldest = 0
+    has_more = False
+    while True:
+        page = fetch_page(key, before)
+        messages = page.get("messages") or []
+        collected.extend(messages)
+        pages += 1
+        has_more = bool(page.get("hasMore"))
+        if messages:
+            oldest = min(parse_ts(m.get("timestamp")) for m in messages)
+        if not messages or not should_page_back(
+            oldest, mark, has_more, pages, MAX_PAGES, floor_ms
+        ):
+            break
+        before = page.get("cursor")
+        if not before:
+            break
+
+    gap = gap_skipped(oldest, mark, has_more, pages, MAX_PAGES, floor_ms)
+    return messages_after(collected, mark), newest_ts(collected), gap
+
+
+def run(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
+
+
+def gh_login():
+    code, out, err = run(["gh", "api", "user", "--jq", ".login"])
+    if code != 0:
+        raise ConfigError(f"cannot determine the GitHub login: {err or out}")
+    return out
+
+
+def approve_github(link, me):
+    repo = link.path
+    number = str(link.number)
+    code, out, err = run(
+        ["gh", "pr", "view", number, "-R", repo, "--json", "author,state,isDraft"]
+    )
+    if code != 0:
+        return "failed", err or out
+    try:
+        meta = json.loads(out)
+    except Exception:
+        return "failed", f"unparseable gh output: {out[:200]}"
+
+    reason = skip_reason(meta, me)
+    if reason:
+        return "skipped", reason
+    if DRY_RUN:
+        return "would-approve", f"author={(meta.get('author') or {}).get('login')}"
+
+    code, out, err = run(
+        ["gh", "pr", "review", number, "-R", repo, "--approve", "-b", APPROVAL_BODY]
+    )
+    if code == 0:
+        return "approved", (meta.get("author") or {}).get("login") or "?"
+    return ("skipped" if is_terminal_failure(err or out) else "failed"), (err or out)
+
+
+def approve_gitlab(link):
+    """Untested against real traffic: no GitLab MR has ever been posted in this
+    DM. Kept so "every MR" holds literally if one ever is."""
+    if not shutil.which("glab"):
+        return "failed", "glab not installed"
+    if DRY_RUN:
+        return "would-approve", "gitlab"
+    code, out, err = run(["glab", "mr", "approve", str(link.number), "-R", link.path])
+    if code == 0:
+        return "approved", "gitlab"
+    return ("skipped" if is_terminal_failure(err or out) else "failed"), (err or out)
+
+
+# ---------------------------------------------------------------------------
+# Cycle
+# ---------------------------------------------------------------------------
+
+
+def read_mark():
+    try:
+        return int((STATE / "cursor").read_text().strip())
+    except Exception:
+        return None
+
+
+def write_mark(value):
+    (STATE / "cursor").write_text(str(int(value)))
+
+
+def cycle(key, me):
+    ledger_path = STATE / "seen.json"
+    mark = read_mark()
+
+    if mark is None:
+        # Cold start: adopt the newest message as the mark and approve nothing.
+        # Otherwise first boot would approve every PR still visible in history,
+        # including long-merged ones.
+        page = fetch_page(key)
+        newest = newest_ts(page.get("messages") or [])
+        write_mark(newest)
+        log(f"COLD     start: mark set to {newest}, history not approved")
+        return
+
+    fresh, newest, gap = collect_new_messages(key, mark)
+    if gap:
+        # Advancing past unread messages loses links; refusing to advance wedges
+        # the daemon on the same window forever. Advance, but make the loss
+        # impossible to miss rather than a quiet NOTE.
+        log(
+            f"WARNING  backfill backstop hit ({MAX_PAGES} pages): messages older "
+            "than this batch were NOT read and their links will never be "
+            "approved — check the DM by hand for that window"
+        )
+    if not fresh:
+        return
+
+    links = []
+    for message in fresh:
+        for link in extract_links(message.get("content")):
+            links.append((link, message.get("senderUsername") or "?"))
+
+    paused = (STATE / "PAUSE").exists()
+    if paused:
+        # Deliberately do NOT advance the mark: on unpause the backlog is picked
+        # up. One summary line per cycle rather than re-logging every link.
+        if links:
+            log(f"PAUSED   {len(links)} link(s) pending; PAUSE file present")
+        return
+
+    ledger = load_ledger(ledger_path)
+    approvals = 0
+    overflow = False
+    for link, sender in links:
+        key_name = ledger_key(link)
+        if key_name in ledger:
+            continue
+        if approvals >= MAX_APPROVALS_PER_CYCLE:
+            overflow = True
+            break
+
+        if link.forge == "github":
+            outcome, detail = approve_github(link, me)
+        else:
+            outcome, detail = approve_gitlab(link)
+        approvals += 1
+
+        target = f"{link.path}#{link.number}"
+        if outcome == "approved":
+            record_ledger(ledger_path, key_name, "approved")
+            log(f"APPROVED {target} by={detail}")
+        elif outcome == "skipped":
+            record_ledger(ledger_path, key_name, detail)
+            log(f"SKIPPED  {target} reason={detail}")
+        elif outcome == "would-approve":
+            log(f"DRY-RUN  {target} would-approve {detail}")
+        else:
+            # Left out of the ledger on purpose so the next cycle retries.
+            log(f"FAILED   {target} reason={detail[:160]} retry=next-cycle")
+        ledger = load_ledger(ledger_path)
+
+    if overflow:
+        # Do not advance the mark, so the unprocessed tail is seen again.
+        log(f"CAPPED   {MAX_APPROVALS_PER_CYCLE} approvals this cycle; remainder next cycle")
+        return
+
+    if newest > mark:
+        write_mark(newest)
+
+
+# ---------------------------------------------------------------------------
+# Lock + entry point
+# ---------------------------------------------------------------------------
+
+
+def acquire_lock():
+    """Directory lock with stale reclaim.
+
+    Same reasoning as routine-run.sh: without reclaim, one SIGKILL disables the
+    job forever, and "not running" is indistinguishable from "nothing to do".
+    """
+    lock = STATE / "run.lock"
+    try:
+        lock.mkdir(parents=True)
+        return True
+    except FileExistsError:
+        pass
+    age = time.time() - lock.stat().st_mtime
+    if age > POLL_SECONDS * 10:
+        log(f"NOTE     stale lock ({int(age)}s) reclaimed")
+        try:
+            lock.rmdir()
+            lock.mkdir()
+            return True
+        except OSError:
+            return False
+    return False
+
+
+def main():
+    once = "--once" in sys.argv
+    STATE.mkdir(parents=True, exist_ok=True)
+
+    if not acquire_lock():
+        log("NOTE     another instance holds the lock; exiting")
+        return 0
+    try:
+        key = api_key()
+        me = gh_login()
+        log(
+            f"START    conversation={CONVERSATION_ID} as={me} "
+            f"dry_run={int(DRY_RUN)} poll={POLL_SECONDS}s once={int(once)}"
+        )
+        while True:
+            try:
+                cycle(key, me)
+            except AuthError:
+                raise
+            except Exception as error:
+                # One bad cycle must not kill a long-running daemon.
+                log(f"ERROR    cycle failed: {type(error).__name__}: {error}")
+            if once:
+                return 0
+            (STATE / "run.lock").touch()
+            time.sleep(POLL_SECONDS)
+    except AuthError as error:
+        log(f"FATAL    {error}")
+        return EX_AUTH
+    except ConfigError as error:
+        log(f"FATAL    {error}")
+        return EX_CONFIG
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        try:
+            (STATE / "run.lock").rmdir()
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,35 @@
+#!/bin/bash
+# Midnight Scout fixture gate.
+#
+# crash-fuzz destroyed its own fixture once; every run afterwards exited 0 and
+# reported "clean" while testing nothing. A missing playground must therefore be
+# a loud non-zero exit, never a quiet clean night.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+SCOUT_ROOM="${MIDNIGHT_SCOUT_ROOM:-2c9c5d214e3a}"   # my-own-server — write playground
+READ_ROOM="${MIDNIGHT_READ_ROOM:-860c25cf02b5}"     # openmarket — realistic content
+DAEMON="${MIDNIGHT_DAEMON:-http://127.0.0.1:31417}"
+RC=0
+
+for R in "$SCOUT_ROOM" "$READ_ROOM"; do
+  if om room info "$R" 2>/dev/null | grep -q "^Room"; then
+    echo "preflight: room $R resolves"
+  else
+    echo "preflight: FATAL room $R does not resolve — playground is damaged or the daemon is down"
+    RC=1
+  fi
+done
+
+# Never trust the bundle: :31417 serves a prebuilt dist/ that can lag OR lead
+# origin/main by hours. Record the stamp so every finding can name what it drove.
+STAMP="$(curl -fsS --max-time 10 "$DAEMON/rooms/" 2>/dev/null | grep -oE 'v=[a-f0-9]+' | head -1)"
+if [[ -n "$STAMP" ]]; then
+  echo "preflight: bundle $STAMP"
+  [[ -n "${ROUTINE_WORK:-}" ]] && printf '%s\n' "$STAMP" > "$ROUTINE_WORK/bundle-stamp.txt"
+else
+  echo "preflight: FATAL no bundle stamp from $DAEMON — daemon not serving"
+  RC=1
+fi
+
+exit "$RC"
