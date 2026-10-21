@@ -78,7 +78,7 @@ Times are local (Asia/Singapore). Weekdays: 0 = Sun … 6 = Sat.
 | `mobile-scout` | Same audit for OpenFloor on the iOS simulator | Mon–Sat 00:00 (disabled since 09-21) |
 | `claude-workflow-review` | Reviews how the day's Claude Code + Codex sessions went; writes `~/.claude/workflow-reviews/` and posts to Discord | Mon–Fri 08:47 |
 | `mobile-status` | Posts the mobile lane's status from `~/.claude/om-bug-loop/` to OM Chat #chat → topic "mobile" | daily 09:00 |
-| `om-kudos` | Daily kudos post; installed by om-agent `tools/kudos/install.sh` (edit there) | daily 10:15 |
+| `om-kudos` | Kudos bot: thanks one teammate in OM Chat #special-mentions, and the team behind each public launch. See [Kudos bot](#kudos-bot-om-kudos) | daily 10:15, fallbacks 12:15 / 15:15 / 18:15 |
 | `om-daily-update` | End-of-day 2-line update to #announcements → "Daily Update" | Mon–Sat 19:30 (paused: `~/.claude/daily-updates/.paused` since 09-21) |
 | `om-kanban-rotate` | Rotates the vault Kanban board to a new week + writes the retro | Sun 23:30 |
 | `pooper-approver` | Auto-approves every PR link posted in THE POOPERS | always on |
@@ -125,6 +125,78 @@ both KeepAlive). Only the plists are here; the code is the `om-agent` repo.
   the background of that session; live copies and state in `~/.claude/chat-todo-watch/` (#chat, on the Linux box),
   `~/.claude/perf-watch/`, `~/.claude/om-agent-watch/`.
 
+## Kudos bot (`om-kudos`)
+
+A routine that makes good work visible. A lot of work here merges without anyone saying
+anything, so the bot says it, specifically, with a real number about who the work helped.
+It posts in OM Chat **#special-mentions** (`316c2aa8c358`) as **@om-agent**, never under
+Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127, hardened in
+!132). Snapshot here: [`hosts/laptop/kudos/`](hosts/laptop/kudos).
+
+**Two kinds of post**
+
+| Post | When | Who it thanks |
+|---|---|---|
+| **Weekly kudos** | Mon / Wed / Fri | One person: lots of work in the last 14 days, little recognition for it |
+| **Launch kudos** | the day after a launch is announced on the public Discord | The people who built what shipped, found from their MRs |
+
+**How the weekly pick works**
+
+1. **Collect.** Every MR merged in the last 14 days across all ~240 `openmarketxyz` GitLab
+   projects, notes on them by other people, commit history of long MRs, and @mentions in
+   the openmarket space's chat rooms.
+2. **Score effort** (weights Nicholas chose, `score.ts` `effortScore`):
+   `2·fixes + 3·issues closed + 1.5·active days + 2·hard MRs + 2·log(1 + MRs) + 1.5·night/weekend days`.
+   A *hard MR* has commits on 3+ different days (an MR just left open doesn't count). Night
+   is 22:00–07:00 UTC+8. MR count is on a log scale so volume can't decide alone; repos
+   touched don't count.
+3. **Score recognition:** comments from others, upvotes, chat @mentions, PIC callouts by
+   @openmarket.
+4. **Pick** the widest gap between effort rank and recognition rank across the team.
+5. **Write and check.** A locked-down Claude run drafts the post and may only *read* GitLab,
+   ore Loki/Prometheus and PostHog. Every number must come from a query it ran. The routine
+   refuses a draft that is too long, mass-mentions, tags someone unknown or excluded, links
+   outside our hosts, or contains anything token-shaped.
+
+**Never picked:** Kyle; anyone holding the space's **@QA** role (read live every run; the run
+stops if it can't be read); bots; anyone thanked by a weekly post in the last 14 days;
+GitLab users without an OM Chat handle in `people.json` (`eusean`, `russell612`).
+
+**Launch posts come from the public Discord only.** Nicholas isn't an admin there, so the
+announcement channel is *Followed* into `#om-launches` on his own server, where a read-only
+bot (`om-readers`) reads the copies. OM Chat #announcements is not watched for launches.
+
+**Where things live (laptop)**
+
+| What | Where |
+|---|---|
+| Installed routine | `~/.local/share/kudos/` (outside `~/Documents`: launchd can't read it reliably) |
+| Wrapper + schedule | `~/.local/bin/om-kudos`, `~/Library/LaunchAgents/com.nicholas.om-kudos.plist` |
+| State (freeze list, Discord cursor, last success) | `~/.local/state/kudos/state.json` |
+| Every run's team ranking and the draft with each number's source | `~/.local/state/kudos/drafts/` |
+| Log | `~/.local/state/kudos/logs/launchd.out` |
+| Discord bot token + channel | `~/.config/kudos/discord.env` (chmod 600) |
+| PostHog read key (optional) | `~/.config/kudos/posthog.env` (chmod 600); without it, no PostHog numbers |
+
+Posting goes over ssh to `~/.local/share/om-routines/routine-say.ts` on the mini, which
+holds @om-agent's key.
+
+**Operating it**
+
+```bash
+tail ~/.local/state/kudos/logs/launchd.out              # what the last runs did
+touch ~/.local/state/kudos/PAUSED                       # pause (rm to resume)
+om-kudos --dry-run --weekly                             # draft only, posts nothing
+# change it: edit om-agent tools/kudos/, merge, then from the om-agent checkout:
+tools/kudos/install.sh --load
+```
+
+**Reliability.** Every GitLab page, chat read and Discord read retries on its own. If the
+10:15 run fails (asleep, network), the 12:15 / 15:15 / 18:15 slots retry; once a run
+succeeds the rest of the day's slots do nothing, and a weekly post never goes out twice in a
+day. Lost days so far: 10-19 (GitLab reset a page mid-listing) and 10-21 (timeout on the
+first request after wake), both fixed in !132.
+
 ## Layout
 
 ```
@@ -148,6 +220,7 @@ codex/
   skills/om-implementer/    Codex skill: house rules for writing the diff against an approved plan
 hosts/
   laptop/bin, laptop/launchd   scripts + plists for the laptop jobs above
+  laptop/kudos                 the kudos bot's routine (snapshot of om-agent tools/kudos)
   mini/bin, mini/launchd       routine-run.sh & friends + plists for the mini jobs above
 ```
 
