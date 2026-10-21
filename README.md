@@ -131,7 +131,7 @@ A routine that makes good work visible. A lot of work here merges without anyone
 anything, so the bot says it, specifically, with a real number about who the work helped.
 It posts in OM Chat **#special-mentions** (`316c2aa8c358`) as **@om-agent**, never under
 Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127, hardened in
-!132, statistics sources in !133). Snapshot here: [`hosts/laptop/kudos/`](hosts/laptop/kudos).
+!132, statistics sources in !133, plain language and security fixes in !134). Snapshot here: [`hosts/laptop/kudos/`](hosts/laptop/kudos).
 
 **Two kinds of post**
 
@@ -158,7 +158,10 @@ Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127,
    **Statistics are the point:** it must try at least three queries across sources for a
    real number ("87 people created 473 wrun alerts since the launch", "this error fired N
    times before the fix, 0 since"); a draft with none gets one more, pointed attempt. A
-   number is never invented, and every one is listed with the query that produced it. The routine
+   number is never invented, and every one is listed with the query that produced it.
+   **Plain language:** posts are for the whole team, so they say what got better for
+   people ("a crash that hit 7 people, fixed the next day"), never internals (issue IDs,
+   error strings, API names), in two or three themes and under 1,200 characters. The routine
    refuses a draft that is too long, mass-mentions, tags someone unknown or excluded, links
    outside our hosts, or contains anything token-shaped.
 

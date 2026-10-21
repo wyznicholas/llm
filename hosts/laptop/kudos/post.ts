@@ -53,8 +53,19 @@ export function postProblems(text: string, mustTag: string[]): string[] {
   return problems;
 }
 
-const SECRET_RE =
-  /\b(glpat-|gldt-|glsa_|sntry[us]_|phx_|phc_|sk-[A-Za-z0-9]|xox[abp]-|ghp_|AKIA[0-9A-Z]{12})|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.|\b[A-Za-z0-9_-]{40,}\b/;
+const SECRET_RE = new RegExp(
+  [
+    // Distinctive prefixes match anywhere, even glued to a word.
+    "(glpat-|gldt-|glsa_|sntry[us]_|phx_|phc_|xox[abp]-|ghp_|github_pat_|AKIA[0-9A-Z]{12})",
+    // A short prefix only at a word start, or "task-…" would match.
+    "(?<![A-Za-z0-9])sk-[A-Za-z0-9]",
+    // JWTs, and Sentry DSNs (a key before @…sentry.io).
+    "eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.",
+    "https?://[0-9a-f]{32}@[\\w.-]*sentry\\.io",
+    // Anything long and token-like.
+    "\\b[A-Za-z0-9_-]{40,}\\b",
+  ].join("|"),
+);
 
 export async function postAsAgent(
   room: string,
