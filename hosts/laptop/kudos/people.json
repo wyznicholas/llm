@@ -1,0 +1,27 @@
+{
+  "_comment": "GitLab username -> OM Chat handle. A person with no entry is still scored but never picked, because a kudos post that cannot tag them reaches nobody. QAs are NOT listed here: they are read live from the space's @QA role on every run.",
+  "handles": {
+    "nicholaswong2": "nicholas_trontal",
+    "cj4269": "cj_tharamine",
+    "benjamin312": "benjylimmy",
+    "bryanchowwq": "bryan_trontal",
+    "skyler18": "skyler_ng",
+    "jianhui3": "kyler_lee",
+    "eamon5": "eamonchin",
+    "jensenkau": "jensenkau",
+    "harry208": "harrychiew",
+    "ryan_ng": "RyanNG0611",
+    "gerald57": "geraldlee",
+    "yungxin1": "yuxyuxyux",
+    "jiin3": "jiinchoi",
+    "daryl37": "dboon333",
+    "pan26": "panosfol",
+    "justin464": "justintg",
+    "balage-trontal": "balage",
+    "khaiwei": "ykhaiwei-trontal",
+    "bobbytfc": "bobbytfc",
+    "twikuan_tc": "weiit"
+  },
+  "_exclude_comment": "Never picked, whatever their score. Kyle by request (2026-10-12).",
+  "exclude": ["kyletf"]
+}

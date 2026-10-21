@@ -5,8 +5,16 @@
   <key>Label</key><string>com.nicholas.om-kudos</string>
   <key>ProgramArguments</key><array><string>/Users/nicholas/.local/bin/om-kudos</string></array>
   <!-- Daily: the launch check runs every day; run.ts itself only does the
-       weekly pick on Mon/Wed/Fri. 10:15 sits after the 08:47 workflow review. -->
-  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>15</integer></dict>
+       weekly pick on Mon/Wed/Fri. 10:15 sits after the 08:47 workflow review.
+       12:15 / 15:15 / 18:15 are fallbacks for a 10:15 run lost to sleep or a
+       network failure (2026-10-19, 2026-10-21); after a success they no-op. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>15</integer></dict>
+  </array>
   <!-- Without a ProcessType, launchd throttles the job's CPU and I/O as
        background work: measured 2026-10-12, the GitLab read took 4.5 min
        under launchd against 1.3 min from a shell. -->
