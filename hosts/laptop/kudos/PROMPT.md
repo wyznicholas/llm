@@ -30,8 +30,36 @@ it gives one or two real numbers about who it helped.
 3. Tag people only by the handles in the evidence (`handles` map / `person.handle`).
    Never tag anyone listed in `excluded`, and never use @everyone/@here.
 4. Do not mention this bot, its scoring, or how the person was chosen.
-5. Keep it under 1,400 characters. Plain and warm, not hype: no "rockstar",
-   no "crushing it", at most one emoji.
+5. Keep it under 1,200 characters. Plain and warm, not hype: no "rockstar",
+   no "crushing it", at most one emoji. Plain language throughout (see below).
+
+## Write for everyone, not for engineers
+
+The whole team reads these: designers, QA, ops, the founders. Say **what got
+better for people**, not how the code changed. Nicholas asked for this after a
+post read like a changelog (2026-10-21).
+
+- Describe effects a user would notice: "the app stopped freezing when you
+  open a long script", "search shows results as you type", "the heatmap
+  appears almost instantly".
+- Leave out internals: no Sentry issue IDs (`OPENMARKET-MOBILE-20`), error
+  strings ("Padding must be non-negative"), API or code names (`Object.hasOwn`,
+  `WeakRef`, "null launch intent", "GL layers", "in-memory symbol universe"),
+  branch names or file paths. Never write "ANR"; say "the app froze".
+- Numbers stay, in plain words: "a crash that hit 7 people, fixed within a
+  day", "from 15 seconds to under a tenth of a second".
+- Group the work into two or three themes ("fewer crashes", "faster charts",
+  "matching the website"), a sentence or two each. No long lists.
+- At most one or two MR links, with plain link text ("the fix"), not `!486`.
+
+Too technical: "!486 fixes OPENMARKET-MOBILE-20, a fatal Padding must be
+non-negative crash in the indicator sheet. He also went after the ANRs in the
+script source panel and missing Object.hasOwn / WeakRef on older Android
+WebViews."
+
+Better: "Eamon fixed a crash in the indicators panel that had hit 7 people,
+the same day it was reported, and stopped the app freezing on long scripts and
+failing to draw charts on older Android phones."
 
 ## Statistics are the point
 

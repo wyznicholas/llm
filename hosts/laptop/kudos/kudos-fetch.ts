@@ -43,6 +43,35 @@ const GRAFANA_ENV = process.env.KUDOS_GRAFANA_ENV ?? `${CONFIG_DIR}/grafana.env`
 // first/last seen are the numbers a fix is measured by. Event bodies
 // (issues/<id>/events) are left out: they carry request data and user details.
 export const SENTRY_PATH = /^(organizations\/trontal-group\/(issues|projects)|issues\/\d+)\/?$/;
+const SENTRY_PARAMS = new Set(["query", "statsPeriod", "limit", "project", "sort"]);
+
+/** Only what a kudos number needs. Issue objects also carry metadata, culprit,
+ *  tags and assignee details that the writer has no use for. */
+export function trimSentry(body: unknown): unknown {
+  const issue = (i: Record<string, unknown>) => ({
+    id: i.id,
+    shortId: i.shortId,
+    title: i.title,
+    project: (i.project as { slug?: unknown } | undefined)?.slug,
+    count: i.count,
+    userCount: i.userCount,
+    firstSeen: i.firstSeen,
+    lastSeen: i.lastSeen,
+    status: i.status,
+    stats: i.stats,
+  });
+  const project = (p: Record<string, unknown>) => ({
+    id: p.id,
+    slug: p.slug,
+    platform: p.platform,
+  });
+  const one = (o: unknown) => {
+    if (!o || typeof o !== "object") return o;
+    const r = o as Record<string, unknown>;
+    return "shortId" in r || "userCount" in r ? issue(r) : "slug" in r ? project(r) : {};
+  };
+  return Array.isArray(body) ? body.map(one) : one(body);
+}
 
 // Grafana proxies Loki and Prometheus for every cluster, including the main one
 // (tharamine) that has no direct endpoint from here. Datasources by name so the
@@ -157,15 +186,32 @@ async function main() {
       const host = env.SENTRY_HOST ?? "https://de.sentry.io";
       if (!/^https:\/\/([a-z0-9-]+\.)?sentry\.io$/.test(host)) fail("unexpected SENTRY_HOST");
       if (!env.SENTRY_TOKEN) fail("Sentry env incomplete");
-      const qs = parseParams(rest).toString();
+      const params = parseParams(rest);
+      for (const k of params.keys())
+        if (!SENTRY_PARAMS.has(k)) fail(`sentry param not allowed: ${k}`);
+      const qs = params.toString();
       const path = target.endsWith("/") ? target : `${target}/`;
-      await getWithToken(`${host}/api/0/${path}${qs ? `?${qs}` : ""}`, env.SENTRY_TOKEN);
+      const res = await fetch(`${host}/api/0/${path}${qs ? `?${qs}` : ""}`, {
+        headers: { Authorization: `Bearer ${env.SENTRY_TOKEN}` },
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+      const text = await res.text();
+      let out = text;
+      try {
+        out = JSON.stringify(trimSentry(JSON.parse(text)));
+      } catch {
+        out = text.slice(0, 500); // an error page, not data
+      }
+      print(`HTTP ${res.status}\n${out}`);
       return;
     }
     case "grafana": {
+      // Own keys only: `constructor` or `__proto__` must not resolve to anything.
+      if (!Object.hasOwn(GRAFANA_DATASOURCES, target)) fail(`unknown datasource ${target}`);
       const ds = GRAFANA_DATASOURCES[target];
       const [path, ...params] = rest;
-      if (!ds) fail(`unknown datasource ${target}`);
+      if (!ds || typeof ds.uid !== "string" || (ds.kind !== "loki" && ds.kind !== "prom"))
+        fail(`unknown datasource ${target}`);
       if (!path || !OBS_PATH.test(path)) fail(`path not allowed: ${path}`);
       const env = readEnv(GRAFANA_ENV, "Grafana");
       const host = env.GRAFANA_HOST ?? "https://grafana.occ.kiyotaka.dev";

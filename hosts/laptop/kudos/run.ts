@@ -84,15 +84,7 @@ async function draftWithStats(mode: "weekly" | "launch", evidence: unknown): Pro
   log(
     `${mode}: first draft has no statistics (${first.noStatsReason ?? "no reason given"}); retrying`,
   );
-  const second = await writeDraft(
-    mode,
-    evidence,
-    workDir,
-    `Your first draft had no statistics. You reported: "${(first.noStatsReason ?? "nothing").slice(0, 400)}". ` +
-      "Try the sources you did not try: PostHog feature:* events and distinct users since the merge or " +
-      "launch, Sentry issue counts before vs after a fix, Grafana loki/prom on the service's cluster. " +
-      "Still never invent a number.",
-  );
+  const second = await writeDraft(mode, evidence, workDir, first.noStatsReason ?? "");
   if (second.skip || second.facts.length > 0) return second;
   log(`${mode}: still no statistics after a second attempt; posting without them`);
   return second.post ? second : first;
