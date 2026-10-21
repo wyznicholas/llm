@@ -54,7 +54,7 @@ export function postProblems(text: string, mustTag: string[]): string[] {
 }
 
 const SECRET_RE =
-  /\b(glpat-|gldt-|phx_|phc_|sk-[A-Za-z0-9]|xox[abp]-|ghp_|AKIA[0-9A-Z]{12})|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.|\b[A-Za-z0-9_-]{40,}\b/;
+  /\b(glpat-|gldt-|glsa_|sntry[us]_|phx_|phc_|sk-[A-Za-z0-9]|xox[abp]-|ghp_|AKIA[0-9A-Z]{12})|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.|\b[A-Za-z0-9_-]{40,}\b/;
 
 export async function postAsAgent(
   room: string,

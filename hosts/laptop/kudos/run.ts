@@ -3,10 +3,11 @@
 // team behind each launch announced on the public Discord. README.md has the
 // design.
 //
-// Usage: bun tools/kudos/run.ts [--dry-run] [--weekly] [--no-launch] [--force]
+// Usage: bun tools/kudos/run.ts [--dry-run] [--weekly] [--no-launch] [--no-weekly] [--force]
 //   --dry-run    draft everything, post nothing, record nothing
 //   --weekly     run the weekly pick even on a day that is not a kudos day
 //   --no-launch  skip the Discord launch check
+//   --no-weekly  skip the weekly pick even on a kudos day
 //   --force      run even if a run already succeeded today
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -73,6 +74,30 @@ export function withBuilderCredit(post: string, creditsGiven: number): string {
   return `${post}\n\n_Kudos bot built by @${BUILDER_HANDLE}_`;
 }
 
+/** Draft, and give a draft with no numbers one more, pointed attempt.
+ *  Statistics are what make a kudos land (Nicholas, 2026-10-21), but the
+ *  writer must never invent one, so the second attempt is told what it tried
+ *  and where else to look, and a post without numbers can still go out. */
+async function draftWithStats(mode: "weekly" | "launch", evidence: unknown): Promise<Draft> {
+  const first = await writeDraft(mode, evidence, workDir);
+  if (first.skip || first.facts.length > 0) return first;
+  log(
+    `${mode}: first draft has no statistics (${first.noStatsReason ?? "no reason given"}); retrying`,
+  );
+  const second = await writeDraft(
+    mode,
+    evidence,
+    workDir,
+    `Your first draft had no statistics. You reported: "${(first.noStatsReason ?? "nothing").slice(0, 400)}". ` +
+      "Try the sources you did not try: PostHog feature:* events and distinct users since the merge or " +
+      "launch, Sentry issue counts before vs after a fix, Grafana loki/prom on the service's cluster. " +
+      "Still never invent a number.",
+  );
+  if (second.skip || second.facts.length > 0) return second;
+  log(`${mode}: still no statistics after a second attempt; posting without them`);
+  return second.post ? second : first;
+}
+
 async function deliver(
   state: KudosState,
   kind: "weekly" | "launch",
@@ -87,9 +112,13 @@ async function deliver(
   const problems = [...postProblems(post, mustTag), ...tagProblems(draft, excluded)];
   const file = join(draftsDir, `${today}-${kind}-${label}${DRY ? ".dry" : ""}.md`);
   const facts = draft.facts.map((f) => `- ${f.claim}\n  source: ${f.source}`).join("\n");
+  const noStats =
+    draft.facts.length === 0
+      ? `no statistics: ${draft.noStatsReason ?? "(no reason given)"}\n`
+      : "";
   writeFileSync(
     file,
-    `${post}\n\n---\nfacts:\n${facts || "(none)"}\nproblems: ${problems.join("; ") || "none"}\n`,
+    `${post}\n\n---\nfacts:\n${facts || "(none)"}\n${noStats}problems: ${problems.join("; ") || "none"}\n`,
   );
   if (problems.length)
     throw new Error(`refusing to post ${kind} kudos: ${problems.join("; ")} (draft: ${file})`);
@@ -124,11 +153,12 @@ async function thankLaunch(
   log(`launch check: candidate ${announcement.source} ${announcement.id}`);
   const cutoff = Date.now() - LAUNCH_MEMORY_DAYS * DAY_MS;
   const alreadyThanked = (state.launches ?? []).filter((l) => Date.parse(l.at) >= cutoff);
-  const draft = await writeDraft(
-    "launch",
-    { announcement, alreadyThanked, handles: people.handles, excluded: [...excluded] },
-    workDir,
-  );
+  const draft = await draftWithStats("launch", {
+    announcement,
+    alreadyThanked,
+    handles: people.handles,
+    excluded: [...excluded],
+  });
   if (draft.skip) {
     log(`launch check: writer skipped ${announcement.id}: ${draft.skip}`);
     return;
@@ -257,16 +287,12 @@ async function weekly(state: KudosState, excluded: Set<string>): Promise<void> {
       description: m.description.slice(0, 600),
     }));
   log(`weekly: picked @${person.handle} (gap ${pick.gap.toFixed(2)})`);
-  const draft = await writeDraft(
-    "weekly",
-    {
-      person: { ...person, mrs: mrsForWriter },
-      windowDays: WINDOW_DAYS,
-      handles: people.handles,
-      excluded: [...excluded],
-    },
-    workDir,
-  );
+  const draft = await draftWithStats("weekly", {
+    person: { ...person, mrs: mrsForWriter },
+    windowDays: WINDOW_DAYS,
+    handles: people.handles,
+    excluded: [...excluded],
+  });
   if (draft.skip) {
     log(`weekly: writer skipped: ${draft.skip}`);
     return;
@@ -305,7 +331,8 @@ async function main(): Promise<void> {
 
   if (!args.has("--no-launch")) await discordLaunchCheck(state, excluded);
   const weekday = new Date(Date.now() + 8 * 3_600_000).getUTCDay();
-  if (args.has("--weekly") || KUDOS_WEEKDAYS.has(weekday)) await weekly(state, excluded);
+  if (args.has("--no-weekly")) log("weekly: skipped (--no-weekly)");
+  else if (args.has("--weekly") || KUDOS_WEEKDAYS.has(weekday)) await weekly(state, excluded);
   else log("weekly: not a kudos day");
   if (!DRY) {
     state.lastSuccessDay = today;

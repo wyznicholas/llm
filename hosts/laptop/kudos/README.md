@@ -81,11 +81,26 @@ Prometheus only answer from this network. It is installed outside
 
 ## Optional sources
 
-- **PostHog**: create a personal API key with read access, then write
-  `~/.config/kudos/posthog.env` (chmod 600) containing
-  `POSTHOG_PERSONAL_API_KEY=…`, `POSTHOG_PROJECT_ID=…` and
-  `POSTHOG_HOST=https://eu.posthog.com`. Without the file the writer skips
-  PostHog.
+- **PostHog** (`~/.config/kudos/posthog.env`): `POSTHOG_PERSONAL_API_KEY`,
+  `POSTHOG_PROJECT_ID` (Kiyotaka = 234431) and `POSTHOG_HOST=https://us.posthog.com`
+  (the project is on the US cloud; the EU host answers 401). The writer counts
+  `feature:*` events by `properties.feature`, distinct users and page views.
+- **Sentry** (`~/.config/kudos/sentry.env`): `SENTRY_TOKEN`, `SENTRY_HOST=https://de.sentry.io`,
+  `SENTRY_ORG=trontal-group`. Issue lists and single issues only (counts, users,
+  first/last seen); event bodies are refused because they carry user data.
+- **Grafana** (`~/.config/kudos/grafana.env`): `GRAFANA_TOKEN`,
+  `GRAFANA_HOST=https://grafana.occ.kiyotaka.dev`. Proxies Loki and Prometheus for
+  the main cluster (tharamine / user-service, unreachable directly) and for ore,
+  blk and cme, by datasource name.
+
+All three files are chmod 600 and read only by `kudos-fetch`, never by the writer
+model. A source whose file is missing is simply skipped.
+
+**Statistics.** Every post should carry at least one real number. The writer must
+try three queries across sources before giving up, and says why in
+`noStatsReason` if nothing fits. A draft without numbers gets one more, pointed
+attempt (`draftWithStats`). A number is never invented, so a post can still go
+out without one; the draft file records why.
 - **Public Discord launches** (`discord.ts`): the operator isn't an admin on
   the public OpenMarket server, so its announcement channel is **Followed**
   into `#om-launches` on a server the operator owns, and a read-only bot
