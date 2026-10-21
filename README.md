@@ -12,15 +12,15 @@ Every agent here is one of three kinds. What tells them apart is **what wakes th
 | Kind | Woken by | Owns | Ends with |
 |---|---|---|---|
 | **Routine** | a clock (launchd, a desktop scheduled task) | one run of one job | a report, and an MR when the run found something to fix |
-| **Chat agent** | a person asking in an OM Chat thread | one thread, until the person is satisfied | a reply in the thread; for a bug or change, an MR with before/after screenshots posted back in the thread |
+| **Chat agent** | a person posting a bug, request or `!todo` in a room it watches | one reported item, until the reporter has the fix | a reply in the thread; for a bug or change, an MR with before/after screenshots posted back in the thread |
 | **Alert agent** | a service's alert firing | one alert class on one service, until it stops firing | the root cause, an MR (or the owning team named with evidence), and the tag that has to be deployed |
 
 Chat and alert agents are **event-only**: a small background shell script (a *watcher*) polls
 the room or log and exits only when something needs attention, which wakes the coordinating
 Claude session. No timers re-arming every 30 minutes, no polling turns — every wake-up is a
 paid turn. The coordinator never does the work itself; it dispatches **one owner agent per
-thread or alert**, and resumes that same agent when the thread gets a reply or the alert fires
-again.
+reported item or alert**, and resumes that same agent when the reporter adds detail or the alert
+fires again.
 
 ### Routines
 
@@ -32,12 +32,17 @@ the alert).
 
 ### Chat agents
 
+Activated by naming a room: "monitor http://localhost:31417/rooms#/82eae63a1bd3 and fix what comes
+in; repos openmarket-chat and openmarket-internal". That is how the **OpenMarket Chat Agent**
+session has run #chat since 2026-10-20 (on the Linux box, state in `~/.claude/chat-todo-watch/`).
+
 | Piece | What it is |
 |---|---|
-| [`claude/skills/chat-watch`](claude/skills/chat-watch/SKILL.md) | The coordinator: watches rooms, dispatches one `chat-agent` per thread, routes every follow-up to the thread's owner |
-| [`claude/skills/chat-watch/watchers/chat_watch.sh`](claude/skills/chat-watch/watchers/chat_watch.sh) | Wakes on `NEW` (a human message matching the trigger, default `@claude`) and `FOLLOW-UP` (any human message in a thread an agent owns) |
-| [`claude/agents/chat-agent.md`](claude/agents/chat-agent.md) | The owner: reads the whole thread and its attachments, replies, reproduces with a screenshot, fixes in a sibling worktree, opens an MR with before/after screenshots, posts them back, follows the thread to the end |
-| **om-agent** (`om-agent` repo; plists in `hosts/mini/launchd`) | The production chat agent: a daemon on the Mac mini answering `@om-agent` in #om-reports and #om-agent-test, opening draft MRs. `chat-agent` is the same job run as a Claude session with Nicholas's skills |
+| [`claude/skills/chat-watch`](claude/skills/chat-watch/SKILL.md) | The coordinator, and the only one that posts. Setup asks Nicholas scope / posting / out-of-scope once, builds the real-app environment, triages the backlog. Then every new human post wakes it: vague reports get a question, fixable ones get `!claim` and a fix agent, follow-ups go to that item's agent. It checks the before/after pictures, replies to the reporter with them and the MR link (as Nicholas, prefixed `🤖 agent:`), and posts `!done` once merged |
+| [`claude/skills/chat-watch/watchers/chat_room_watch.sh`](claude/skills/chat-watch/watchers/chat_room_watch.sh) | Wakes on every human post in the room; skips agent badges, the coordinator's own 🤖 posts and bare `!claim`/`!done` markers |
+| [`claude/agents/chat-agent.md`](claude/agents/chat-agent.md) | The fix agent: one item, never posts. Reproduces in the real running app, fixes in a sibling worktree, proves it with before/after pictures and behaviour checks, opens the MR/PR, drafts the reporter's reply |
+| [`claude/skills/chat-watch/live/chat-82eae63a1bd3/`](claude/skills/chat-watch/live/chat-82eae63a1bd3) | The live #chat instance: watcher, `FIX_BRIEF.md`, `ENV.md` (real GUI/TUI on numbered ports), `gui.sh`, `tui.sh`, `shot.mjs`. The template for a new room |
+| **om-agent** (`om-agent` repo; plists in `hosts/mini/launchd`) | A different chat agent: a daemon on the Mac mini that only acts on `@om-agent` mentions in #om-reports and #om-agent-test and opens draft MRs |
 
 ### Alert agents
 
@@ -56,7 +61,7 @@ These are not a fourth kind; they are steps the other agents lean on.
 |---|---|
 | **Investigation** | Not a standalone agent. It is Stage 1 of `om-task` ([`references/investigation.md`](claude/skills/om-bug-loop/references/investigation.md)): reproduce with a screenshot, root cause at file:line, a verification spec written before any code. `chat-agent` and `alert-agent` follow the same rules. For "investigate, plan only, don't touch code" there is the `ivtg` skill (laptop only, not in this repo). Design questions go to `om-research`. |
 | **Verification** | `om-verifier` (the independent gate `om-task` spawns: re-runs the repro on both arms, diffs failures against the merge-base, audits the write-up). Outside the board, the `verify` skill does the same proof for one fix and writes `verify-report.md` for the MR — routines, chat agents and alert agents all use it. |
-| **Implementation** | `om-implementer` (Codex skill): house rules for writing the diff against an approved plan. On the board, Codex writes every diff; chat and alert agents may write small fixes themselves. |
+| **Implementation** | `om-implementer` (Codex skill): house rules for writing the diff against an approved plan. On the board, Codex writes every diff; chat and alert agents write their fixes themselves. |
 
 `om-bug-loop` ties these together for the Kanban board: a card in the `todo` lane →
 `om-task` / `om-quickfix` / `om-feature` / `om-research` → `om-verifier` → commits on a batch MR.
@@ -117,7 +122,7 @@ both KeepAlive). Only the plists are here; the code is the `om-agent` repo.
 
 - `om-bug-loop`: the Kanban watcher + coordinator and its subagents.
 - `chat-watch` and `alert-watch`: the chat and alert coordinators above. Their watchers run in
-  the background of that session; live copies and state in `~/.claude/chat-watch/`,
+  the background of that session; live copies and state in `~/.claude/chat-todo-watch/` (#chat, on the Linux box),
   `~/.claude/perf-watch/`, `~/.claude/om-agent-watch/`.
 
 ## Layout
@@ -125,7 +130,7 @@ both KeepAlive). Only the plists are here; the code is the `om-agent` repo.
 ```
 claude/
   skills/
-    chat-watch/             chat-agent coordinator + watchers/chat_watch.sh
+    chat-watch/             chat-agent coordinator, watchers/chat_room_watch.sh, live/ (the #chat instance)
     alert-watch/            alert-agent coordinator + watchers/ (live perf-sentinel + om-agent watchers)
     om-bug-loop/            board watcher + coordinator (SKILL.md, references, templates, scripts)
     web-port-scout/         web → mobile parity scout
@@ -177,7 +182,7 @@ Scripts run on [Bun](https://bun.sh):
   `features-mobile-charts`). Product docs kept in the Obsidian vault
   (`openmarket/`, `openmarket-mobile/`, `openmarket-charts/`, `openmarket-mobile-charts/` →
   `Feature Map`). Symlink them back into `claude/skills/om-bug-loop/references/`.
-- **Runtime state**: `~/.claude/om-bug-loop/` (tasks.json, trains, evidence, auth), watcher state (`*.seq`, `*.known`, `owned.txt`, `suppressed.log`),
+- **Runtime state**: `~/.claude/om-bug-loop/` (tasks.json, trains, evidence, auth), watcher state (`seq`, `*.known`, `suppressed.log`), chat ledgers (`LEDGER.md`, `baseline.md`, `shots/`),
   `~/.local/state/routines/` on the mini, scout ledgers. Machine-local, recreated as things run.
 - **Credentials**: every script reads them from local files (`om login`, glab, SOPS); none are stored here.
 - The `.bak-*` / `.REJECTED-*` / `.disabled-*` snapshots from the source directories.
