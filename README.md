@@ -131,7 +131,7 @@ A routine that makes good work visible. A lot of work here merges without anyone
 anything, so the bot says it, specifically, with a real number about who the work helped.
 It posts in OM Chat **#special-mentions** (`316c2aa8c358`) as **@om-agent**, never under
 Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127, hardened in
-!132). Snapshot here: [`hosts/laptop/kudos/`](hosts/laptop/kudos).
+!132, statistics sources in !133). Snapshot here: [`hosts/laptop/kudos/`](hosts/laptop/kudos).
 
 **Two kinds of post**
 
@@ -154,7 +154,11 @@ Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127,
    @openmarket.
 4. **Pick** the widest gap between effort rank and recognition rank across the team.
 5. **Write and check.** A locked-down Claude run drafts the post and may only *read* GitLab,
-   ore Loki/Prometheus and PostHog. Every number must come from a query it ran. The routine
+   PostHog, Sentry and Grafana (Loki/Prometheus for the main, ore, blk and cme clusters).
+   **Statistics are the point:** it must try at least three queries across sources for a
+   real number ("87 people created 473 wrun alerts since the launch", "this error fired N
+   times before the fix, 0 since"); a draft with none gets one more, pointed attempt. A
+   number is never invented, and every one is listed with the query that produced it. The routine
    refuses a draft that is too long, mass-mentions, tags someone unknown or excluded, links
    outside our hosts, or contains anything token-shaped.
 
@@ -176,7 +180,9 @@ bot (`om-readers`) reads the copies. OM Chat #announcements is not watched for l
 | Every run's team ranking and the draft with each number's source | `~/.local/state/kudos/drafts/` |
 | Log | `~/.local/state/kudos/logs/launchd.out` |
 | Discord bot token + channel | `~/.config/kudos/discord.env` (chmod 600) |
-| PostHog read key (optional) | `~/.config/kudos/posthog.env` (chmod 600); without it, no PostHog numbers |
+| PostHog read key | `~/.config/kudos/posthog.env` (chmod 600): key, project `234431`, `POSTHOG_HOST=https://us.posthog.com` (the project is on the US cloud) |
+| Sentry read token | `~/.config/kudos/sentry.env` (chmod 600): `de.sentry.io`, org `trontal-group`; issue lists and single issues only |
+| Grafana token | `~/.config/kudos/grafana.env` (chmod 600): `grafana.occ.kiyotaka.dev`; Loki and Prometheus datasources only |
 
 Posting goes over ssh to `~/.local/share/om-routines/routine-say.ts` on the mini, which
 holds @om-agent's key.
@@ -195,7 +201,12 @@ tools/kudos/install.sh --load
 10:15 run fails (asleep, network), the 12:15 / 15:15 / 18:15 slots retry; once a run
 succeeds the rest of the day's slots do nothing, and a weekly post never goes out twice in a
 day. Lost days so far: 10-19 (GitLab reset a page mid-listing) and 10-21 (timeout on the
-first request after wake), both fixed in !132.
+first request after wake), both fixed in !132. The token files are read only by
+`kudos-fetch`, never by the writer model; a missing file just skips that source.
+
+**History.** #dev-forums Oct 14–16 (4 posts: Big Trades and free-alerts launches,
+@kyler_lee, @benjylimmy; the first two carried the builder credit). Moved to
+#special-mentions on 10-21; first post there @eamonchin, with PostHog numbers.
 
 ## Layout
 
