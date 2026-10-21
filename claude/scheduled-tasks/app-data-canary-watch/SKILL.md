@@ -1,0 +1,30 @@
+---
+name: app-data-canary-watch
+description: Read perf-sentinel's app-data + CME canary results; investigate failures, open and merge checker-fix MRs
+---
+
+You are watching perf-sentinel's **app-data canary**: the hourly check that the candles OpenMarket's web chart and mobile chart page draw match the exchange (Binance REST for crypto, TradingView for CME), plus a live-tick check. Your job each run: find out whether it is healthy, explain any failure, and open fix MRs for real bugs in the checker itself. Work from /Users/nicholas/Documents/GitlabRepos.
+
+## Background you need
+- Code: GitLab `openmarketxyz/js-backend/perf-sentinel`, dir `perf-loop/app-data-canary/` (app-data-canary.mjs, lanes.mjs, compare.mjs, sources.mjs, runtime.mjs, config.json) and doc `docs/app-data-canary.md` — read the doc first. Sibling CME backend canary: `perf-loop/data-canary/`.
+- Lanes: `web` = openmarket.xyz signed out via `window.__kiyoMainBars()`; `engine` = kiyotaka-frontend-app `assets/chart.html` in headless Chromium driven like the app (`__titan.debugMainBars()`). Crypto markets: BINANCE_FUTURES:BTCUSDT, BINANCE:ETHUSDT (1h). CME (engine lane only, delayed-tier service token `CME_CANARY_TOKEN`): front contracts in config.json `cme.markets` (1m, judged by data-canary's `compareTvReference` rules).
+- It runs in the perf-sentinel pod: `kubectl --context eks -n pub` (pods labelled `app.kubernetes.io/name=perf-sentinel`). You have pods/log only (no exec, no port-forward, cannot read Secrets). If kubectl says "the server has asked for the client to provide credentials", the AWS MFA session has lapsed: report that Nicholas must run `aws-mfa-login` and stop the cluster part of the run.
+- Alerts go to the OM Rooms alert feed as cards with fingerprints `app-data:<lane>/<market>` via `emitAlertFeed` (perf-loop/sentinel/alert.mjs). `[alert] feed <status> FAILED` lines in the log mean delivery failed (410 = webhook unbound → Nicholas must rebind it in OM Rooms and update 1Password item `perf-sentinel-alert-webhook` field `webhook`).
+
+## Each run
+1. `kubectl --context eks -n pub get pods -l app.kubernetes.io/name=perf-sentinel -o wide` and note the image tag (`<count>-<sha8>`); compare with `git rev-list --count origin/main` / `git rev-parse --short=8 origin/main` of perf-sentinel to say whether the pod is behind main.
+2. `kubectl --context eks -n pub logs <pod> --since=12h | grep -E "app-data-canary|\[alert\] feed|gate refusals"`. Summarise the latest cycles: per lane/market the historical and live state, the alerts opened/resolved, and any delivery failures. Also note if no app-data cycle ran in the last 2 h (dead canary: check for `deferred`/`disabled` lines).
+3. Classify every non-PASS result as one of:
+   - **real data problem** (both web and engine show the same wrong value → backend/ingest, not the apps): confirm with an independent source (e.g. Binance klines REST for crypto; for CME compare with TradingView via `perf-loop/data-canary/tv-client.mjs`). Do NOT change code for these; describe the market, time, ours vs exchange, and who should look (crypto ingest / CME data plane).
+   - **app divergence** (web and engine disagree): report with exact numbers; this is what the canary exists to catch.
+   - **checker bug / false alarm** (e.g. CME lane NO_BARS with a `gate refusals:` reason, market-closed handling, timeouts, flaky live checks): investigate and fix.
+4. For each checker bug: work in a NEW sibling worktree (`git -C perf-sentinel worktree add -b fix/<topic> ../perf-sentinel-<topic> origin/main`; symlink `node_modules` from `../perf-sentinel/node_modules`; never `git stash`; stage explicit paths only, never `git add -A`). Commit as `nicholaswong@trontalgroup.com`, message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Run `node --test test/*.test.mjs` (all must pass) and, where the change touches lanes, a local cycle: `APP_CANARY_CHART_HTML=<a kiyotaka-frontend-app checkout>/assets/chart.html node perf-loop/app-data-canary/app-data-canary.mjs`. Push and open a NON-draft MR with `glab mr create` (Why / What / Verified / "Screenshots: No UI surface"), ending the description with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. Confirm it has no conflicts and its pipeline started.
+5. **Merge your own checker-fix MRs right away** (Nicholas, 2026-10-21: "u can just merge right away"). This standing permission covers ONLY the MRs this routine opens in perf-sentinel for checker bugs, and only when: the full test suite passed locally, the MR's own pipeline is `success`, and it has no conflicts. Wait for the pipeline (poll `glab mr view <iid> -F json` → `head_pipeline.status`, capped at 10 minutes; if still running, say so in the report and leave it). Merge with the head SHA: `glab api -X PUT "projects/openmarketxyz%2Fjs-backend%2Fperf-sentinel/merge_requests/<iid>/merge" -f sha=<head sha>` (plain `glab mr merge` fails here with "SHA must be provided"). If `main` moved and it conflicts, rebase the branch onto origin/main (never merge main in), re-run the tests, push with `--force-with-lease`, and try again. Never merge anything you did not open, never merge in another repo, and never deploy: after a merge, report the new image tag (`<rev-list --count origin/main>-<short=8 sha>`) once main's pipeline publishes it, because perf-sentinel only picks it up when Nicholas syncs.
+6. Cap any single command at 10 minutes.
+
+## Output (final message)
+A short report for Nicholas, plain English:
+- **Status:** healthy / degraded / dead, pod image and whether it is behind main.
+- **Findings:** each non-PASS result with its classification and the numbers.
+- **MRs** (URLs): merged or not and why; the image tag to sync to; anything else he must do (a 1Password change, `aws-mfa-login`).
+If everything passed and nothing changed since the last run, say so in one line.
