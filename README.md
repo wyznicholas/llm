@@ -131,7 +131,7 @@ A routine that makes good work visible. A lot of work here merges without anyone
 anything, so the bot says it, specifically, with a real number about who the work helped.
 It posts in OM Chat **#special-mentions** (`316c2aa8c358`) as **@om-agent**, never under
 Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127, hardened in
-!132, statistics sources in !133, plain language and security fixes in !134). Snapshot here: [`hosts/laptop/kudos/`](hosts/laptop/kudos).
+!132, statistics sources in !133, plain language and security fixes in !134 and !135). Snapshot here: [`hosts/laptop/kudos/`](hosts/laptop/kudos).
 
 **Two kinds of post**
 

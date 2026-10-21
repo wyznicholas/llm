@@ -48,7 +48,9 @@ export function extractDraft(reply: string): Draft {
   const str = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
   const facts = Array.isArray(parsed.facts) ? parsed.facts : [];
   return {
-    ...(str(parsed.skip, 500) ? { skip: str(parsed.skip, 500) } : {}),
+    // Any truthy skip is a skip, whatever its type: a skip is the safe outcome,
+    // and dropping a non-string one would publish a draft the writer withheld.
+    ...(parsed.skip ? { skip: str(parsed.skip, 500) || "writer asked to skip" } : {}),
     post: str(parsed.post, 4000),
     tags: Array.isArray(parsed.tags)
       ? parsed.tags.filter((t) => typeof t === "string").slice(0, 10)
@@ -61,12 +63,15 @@ export function extractDraft(reply: string): Draft {
   };
 }
 
-/** A previous model reply, made safe to quote back as data: no fence markers,
- *  one line, bounded. */
+/** A previous model reply, made safe to quote back as data. An allowlist, not
+ *  a deletion: deleting fence markers can be undone by nesting them
+ *  ("<<<<<<XEVIDENCE"), so every character outside plain prose (including
+ *  < > and newlines) becomes a space and no fence can ever be reassembled. */
 export function asQuotedData(text: string, max = 300): string {
   return text
-    .replace(/<<<[A-Z_]+|[A-Z_]+>>>/g, "")
-    .replace(/[\r\n]+/g, " ")
+    .replace(/[^A-Za-z0-9 ,.;:()'/_%-]/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim()
     .slice(0, max);
 }
 
