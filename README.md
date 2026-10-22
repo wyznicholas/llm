@@ -86,13 +86,20 @@ Times are local (Asia/Singapore). Weekdays: 0 = Sun … 6 = Sat.
 `midnight-scout` and `mobile-scout` both run through `hosts/laptop/bin/midnight-run.sh`,
 which reads the skill's `phases` / `preflight` files.
 
+| `claude-work-watchdog` | Reopens the second Claude desktop ("Claude Work") after it quits for an update. See [`hosts/laptop/claude-work`](hosts/laptop/claude-work/README.md) | on the `update-attempt` file changing |
+
 ### Desktop-app scheduled tasks (`~/.claude/scheduled-tasks`)
+
+Since 10-22 these run in the second desktop copy, **Claude Work** (Nicholas Trontal account),
+and are switched off in the main Claude. They only run while Claude Work is open. Setup, and
+the Alert Agents / Chat Agents / Routines sessions that moved with them:
+[`hosts/laptop/claude-work`](hosts/laptop/claude-work/README.md).
 
 | Task | What it does | When |
 |---|---|---|
 | `app-data-canary-watch` | Reads perf-sentinel's app-data + CME canary results, classifies each failure (data / app divergence / checker bug), fixes and merges its own checker-fix MRs | Mon–Fri 10:15, 16:15 |
 | `train-reads` | Writes the morning train read from the topic-queue doc and yesterday's sessions | Mon–Fri 09:38 |
-| `web-port-scout` | Records new web `production` commits in kiyotaka-frontend-app's `docs/web-parity.md`, ships `port` rows in one MR | every 4 h (not in the scheduler as of 10-21) |
+| `web-port-scout` | Records new web `production` commits in kiyotaka-frontend-app's `docs/web-parity.md`, ships `port` rows in one MR | every 4 h, at :07 |
 | `openfloor-feature-map-tonight` | One-off: build the OpenFloor Feature Map overnight | done |
 
 ### Mac mini (`ombot@oms-mac-mini`, scripts in `~/.local/bin`, skills in `~/repos/.claude/skills`)
@@ -237,6 +244,7 @@ codex/
 hosts/
   laptop/bin, laptop/launchd   scripts + plists for the laptop jobs above
   laptop/kudos                 the kudos bot's routine (snapshot of om-agent tools/kudos)
+  laptop/claude-work           second Claude desktop: launcher, update watchdog, what moved there
   mini/bin, mini/launchd       routine-run.sh & friends + plists for the mini jobs above
 ```
 
