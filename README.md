@@ -169,7 +169,9 @@ Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127,
 stops if it can't be read); bots; anyone thanked by a weekly post in the last 14 days;
 GitLab users without an OM Chat handle in `people.json` (`eusean`, `russell612`).
 
-**Launch posts come from the public Discord only.** Nicholas isn't an admin there, so the
+**Launch posts come from the public Discord only.** Every Followed announcement goes to
+the writer, which judges whether it shipped something (a keyword filter used to decide, and
+silently dropped the desktop-app launch on 10-21; fixed in om-agent !137). Nicholas isn't an admin there, so the
 announcement channel is *Followed* into `#om-launches` on his own server, where a read-only
 bot (`om-readers`) reads the copies. OM Chat #announcements is not watched for launches.
 

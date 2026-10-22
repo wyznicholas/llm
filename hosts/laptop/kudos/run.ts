@@ -32,8 +32,6 @@ const WINDOW_DAYS = 14;
 // Three posts a week rather than daily: rare enough that a kudos still means
 // something when it lands (2026-10-12).
 const KUDOS_WEEKDAYS = new Set([1, 3, 5]); // Mon, Wed, Fri, local time
-const LAUNCH_RE =
-  /\b(launch(ed|ing)?|is (now )?live|now live|live on|released?|shipp?ed|rolling out|available now|going mobile)\b/i;
 // Launches come only from the public Discord (2026-10-12); OM Chat's
 // #announcements is not watched for them. A PIC callout by these accounts in
 // OM Chat still counts as recognition in the weekly pick: it is public credit.
@@ -184,7 +182,11 @@ async function discordLaunchCheck(state: KudosState, excluded: Set<string>): Pro
     log(`discord: first run, watching from message ${read.head}`);
     return;
   }
-  for (const post of read.posts.filter((p) => LAUNCH_RE.test(p.text))) {
+  // Every Followed announcement goes to the writer, which skips anything that
+  // is not a shipped release. A keyword filter used to decide first, and
+  // silently dropped the desktop-app launch ("our desktop apps are here!",
+  // 2026-10-21) because none of its words were on the list.
+  for (const post of read.posts) {
     await thankLaunch(state, excluded, { source: "public Discord", ...post }, `discord${post.id}`);
     if (!DRY) {
       state.discordAfter = post.id;
