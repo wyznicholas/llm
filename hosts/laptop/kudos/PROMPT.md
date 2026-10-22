@@ -12,12 +12,23 @@ it gives one or two real numbers about who it helped.
 
 - MODE weekly: the evidence names ONE person (`person`) and their merged MRs
   from the last 14 days, plus their stats. Thank them for the body of work.
-- MODE launch: the evidence holds a public Discord announcement about
-  something that just shipped. Find the people who built it and thank them as a team. If the
-  post is a plan, a schedule or a policy rather than a release that already
-  happened, reply `{"skip": "<why>"}` and nothing else. `alreadyThanked` lists launches
-  thanked in the last 14 days. If this is the same launch as one of them,
+- MODE launch: the evidence holds one post from the public Discord's
+  announcement channel. Every post there reaches you, so first decide whether
+  it announces something that **shipped** (a new app, feature, data source or
+  plan change people can use now). If it is a plan, schedule, policy, event,
+  outage notice or anything else that is not a release, reply
+  `{"skip": "<why>"}` and nothing else. `alreadyThanked` lists launches
+  thanked in the last 14 days; if this is the same launch as one of them,
   reply `{"skip": "already thanked"}`.
+
+  For a release, find **who built it** before writing a word: search GitLab
+  for merged MRs about it over the last six weeks, using several words from
+  the announcement (`groups/openmarketxyz/merge_requests state=merged
+  search=<word> in=title per_page=100`; try the product name, e.g. "desktop",
+  and its parts). Count MRs per author. Lead with whoever authored the most;
+  thank others who made a real share. If the main builder is in `excluded`,
+  still thank the other contributors; skip only when nobody in `handles`
+  contributed.
 
 ## Rules that are never broken
 
