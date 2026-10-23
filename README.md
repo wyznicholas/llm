@@ -78,7 +78,7 @@ Times are local (Asia/Singapore). Weekdays: 0 = Sun … 6 = Sat.
 | `mobile-scout` | Same audit for OpenFloor on the iOS simulator | Mon–Sat 00:00 (disabled since 09-21) |
 | `claude-workflow-review` | Reviews how the day's Claude Code + Codex sessions went; writes `~/.claude/workflow-reviews/` and posts to Discord | Mon–Fri 08:47 |
 | `mobile-status` | Posts the mobile lane's status from `~/.claude/om-bug-loop/` to OM Chat #chat → topic "mobile" | daily 09:00 |
-| `om-kudos` | Kudos bot: thanks one teammate in OM Chat #special-mentions, and the team behind each public launch. See [Kudos bot](#kudos-bot-om-kudos) | daily 10:15, fallbacks 12:15 / 15:15 / 18:15 |
+| `om-kudos` | Kudos bot: thanks one teammate a week (Fridays) in OM Chat #special-mentions, and the team behind each public launch. See [Kudos bot](#kudos-bot-om-kudos) | daily 10:15, fallbacks 12:15 / 15:15 / 18:15 |
 | `om-daily-update` | End-of-day 2-line update to #announcements → "Daily Update" | Mon–Sat 19:30 (paused: `~/.claude/daily-updates/.paused` since 09-21) |
 | `om-kanban-rotate` | Rotates the vault Kanban board to a new week + writes the retro | Sun 23:30 |
 | `pooper-approver` | Auto-approves every PR link posted in THE POOPERS | always on |
@@ -144,7 +144,7 @@ Nicholas's name. Source of truth: om-agent repo, `tools/kudos/` (merged in !127,
 
 | Post | When | Who it thanks |
 |---|---|---|
-| **Weekly kudos** | Mon / Wed / Fri | One person: lots of work in the last 14 days, little recognition for it |
+| **Weekly kudos** | Fridays (once a week, since 10-23) | One person: lots of work in the last 14 days, little recognition for it |
 | **Launch kudos** | the day after a launch is announced on the public Discord | The people who built what shipped, found from their MRs |
 
 **How the weekly pick works**

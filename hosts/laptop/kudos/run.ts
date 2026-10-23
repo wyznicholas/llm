@@ -29,9 +29,10 @@ import type { KudosState, PersonStats } from "./types";
 import { type Draft, writeDraft } from "./writer";
 
 const WINDOW_DAYS = 14;
-// Three posts a week rather than daily: rare enough that a kudos still means
-// something when it lands (2026-10-12).
-const KUDOS_WEEKDAYS = new Set([1, 3, 5]); // Mon, Wed, Fri, local time
+// Once a week, on Friday (Nicholas, 2026-10-23; Mon/Wed/Fri before that), so a
+// kudos still means something when it lands. Launch posts are not limited:
+// they follow the public Discord announcements, any day.
+const KUDOS_WEEKDAYS = new Set([5]); // Friday, local time
 // Launches come only from the public Discord (2026-10-12); OM Chat's
 // #announcements is not watched for them. A PIC callout by these accounts in
 // OM Chat still counts as recognition in the weekly pick: it is public credit.

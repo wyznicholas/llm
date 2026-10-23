@@ -1,6 +1,6 @@
 # kudos — appreciation posts in #special-mentions
 
-Three times a week (Mon / Wed / Fri) this routine picks one teammate who has
+Once a week, on Friday, this routine picks one teammate who has
 done a lot of work over the last 14 days but has not been thanked much for
 it, and posts a specific thank-you in OM Chat #special-mentions as **@om-agent**
 (#dev-forums until 2026-10-21).
