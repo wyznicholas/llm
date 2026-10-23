@@ -42,7 +42,7 @@ cat > "$PLIST" <<EOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array><string>$BIN</string></array>
   <!-- Daily: the launch check runs every day; run.ts itself only does the
-       weekly pick on Mon/Wed/Fri. 10:15 sits after the 08:47 workflow review.
+       weekly pick on Fridays. 10:15 sits after the 08:47 workflow review.
        12:15 / 15:15 / 18:15 are fallbacks for a 10:15 run lost to sleep or a
        network failure (2026-10-19, 2026-10-21); after a success they no-op. -->
   <key>StartCalendarInterval</key>
