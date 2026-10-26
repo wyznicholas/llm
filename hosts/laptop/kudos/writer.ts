@@ -162,6 +162,12 @@ export async function writeDraft(
   ]);
   clearTimeout(timer);
   writeFileSync(join(workDir, `writer-${mode}.log`), `${stdout}\n--- stderr ---\n${stderr}`);
-  if (code !== 0) throw new Error(`writer exited ${code}: ${stderr.trim().slice(0, 500)}`);
+  if (code !== 0) {
+    // claude -p prints account problems (spend limit, logged out) on stdout
+    // with an empty stderr, which left the log at a bare "writer exited 1:"
+    // (2026-10-26). Name whichever stream says why.
+    const why = (stderr.trim() || stdout.trim()).slice(0, 500);
+    throw new Error(`writer exited ${code}: ${why || "(no output)"}`);
+  }
   return extractDraft(stdout);
 }
