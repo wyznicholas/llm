@@ -1,9 +1,11 @@
 // Deliver a kudos post as @om-agent and keep the routine's small state file.
 //
-// The badge key lives only on oms-mac-mini, so delivery is the same path every
-// other routine uses: pipe the body over ssh into tools/routine-say.ts there.
-// That script posts with om-agent's key, which is why the post never carries
-// the operator's name.
+// Delivery runs tools/routine-say.ts on this Mac with om-agent's app key, which
+// is why the post never carries the operator's name. It used to ssh into
+// oms-mac-mini, where that key lived; on 2026-10-27 the mini was rebuilt as a
+// CI runner, the ombot account and the key went with it, and the iOS launch
+// post could not be delivered. The key now lives here, in KEY_FILE (minted with
+// `om app rotate om-agent`), so posting no longer depends on another machine.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -11,8 +13,13 @@ import type { KudosState } from "./types";
 
 export const STATE_DIR = process.env.KUDOS_STATE_DIR ?? `${homedir()}/.local/state/kudos`;
 const STATE_FILE = `${STATE_DIR}/state.json`;
-const MINI = "oms-mac-mini";
-const REMOTE_SAY = "~/.local/share/om-routines/routine-say.ts";
+const KEY_FILE = `${homedir()}/.config/kudos/om-agent.env`;
+// install.sh bundles routine-say into say.js next to the installed routine, so
+// the launchd job never reads the repo under ~/Documents (TCC); a run from the
+// checkout uses the source directly.
+const SAY = existsSync(`${import.meta.dir}/say.js`)
+  ? `${import.meta.dir}/say.js`
+  : `${import.meta.dir}/../routine-say.ts`;
 // The relay splits at 2000 bytes and a split post loses its formatting, so an
 // over-long post is refused instead of being sent in pieces.
 export const MAX_POST_BYTES = 1900;
@@ -72,18 +79,16 @@ export async function postAsAgent(
   text: string,
   topicId?: string,
 ): Promise<number | null> {
-  const proc = Bun.spawn(
-    [
-      "ssh",
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=15",
-      MINI,
-      `bun ${REMOTE_SAY} ${room}${topicId ? ` ${topicId}` : ""}`,
-    ],
-    { stdin: new TextEncoder().encode(text), stdout: "pipe", stderr: "pipe" },
-  );
+  if (!existsSync(KEY_FILE)) throw new Error(`om-agent key missing: ${KEY_FILE}`);
+  const apiKey = readFileSync(KEY_FILE, "utf8").match(/^\s*OM_AGENT_API_KEY\s*=\s*(\S+)/m)?.[1];
+  if (!apiKey) throw new Error(`no OM_AGENT_API_KEY in ${KEY_FILE}`);
+  const proc = Bun.spawn([process.execPath, SAY, room, ...(topicId ? [topicId] : [])], {
+    stdin: new TextEncoder().encode(text),
+    stdout: "pipe",
+    stderr: "pipe",
+    // Only what routine-say needs; the key never goes on the command line.
+    env: { PATH: process.env.PATH ?? "", HOME: homedir(), OM_AGENT_API_KEY: apiKey },
+  });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

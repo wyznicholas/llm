@@ -19,6 +19,9 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 mkdir -p "$DEST" "$STATE/logs" "$HOME/.local/bin"
 cp "$SRC"/*.ts "$SRC/PROMPT.md" "$SRC/people.json" "$DEST/"
+# post.ts runs routine-say locally. Bundle it with its rooms-client dependency
+# so the installed copy needs no node_modules and nothing from ~/Documents.
+bun build "$SRC/../routine-say.ts" --target bun --outfile "$DEST/say.js" >/dev/null
 
 cat > "$BIN" <<EOF
 #!/bin/bash
