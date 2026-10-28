@@ -104,6 +104,9 @@ the Alert Agents / Chat Agents / Routines sessions that moved with them:
 
 ### Mac mini (`ombot@oms-mac-mini`, scripts in `~/.local/bin`, skills in `~/repos/.claude/skills`)
 
+> **Gone since 2026-10-27:** the mini was rebuilt as the CI runner `mac-runner` (same
+> address, no `ombot` account). This section records what ran there; none of it runs now.
+
 Twelve code-health routines, each run twice a week by `hosts/mini/bin/routine-run.sh <skill>`
 (lock, time cap, phases, usage-limit deferral, Discord ping via `routine-ping.sh`).
 
@@ -195,9 +198,12 @@ bot (`om-readers`) reads the copies. OM Chat #announcements is not watched for l
 | PostHog read key | `~/.config/kudos/posthog.env` (chmod 600): key, project `234431`, `POSTHOG_HOST=https://us.posthog.com` (the project is on the US cloud) |
 | Sentry read token | `~/.config/kudos/sentry.env` (chmod 600): `de.sentry.io`, org `trontal-group`; issue lists and single issues only |
 | Grafana token | `~/.config/kudos/grafana.env` (chmod 600): `grafana.occ.kiyotaka.dev`; Loki and Prometheus datasources only |
+| om-agent app key | `~/.config/kudos/om-agent.env` (chmod 600): `OM_AGENT_API_KEY`, minted with `om app rotate om-agent` (prints once; revokes older keys) |
 
-Posting goes over ssh to `~/.local/share/om-routines/routine-say.ts` on the mini, which
-holds @om-agent's key.
+Posting runs `routine-say` on this laptop (bundled into `~/.local/share/kudos/say.js` by
+`install.sh`) with @om-agent's key. It used to ssh into oms-mac-mini; that machine was
+rebuilt as the CI runner `mac-runner` on 2026-10-27 and its `ombot` account is gone
+(om-agent!142).
 
 **Operating it**
 

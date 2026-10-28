@@ -35,7 +35,8 @@ helped.
    query it ran; the draft lists each claim with its source.
 5. **Check and send** (`post.ts`): the draft is refused if it is too long, has
    a mass mention, misses the person's tag, or tags anyone unknown or
-   excluded. Otherwise it goes over ssh to `routine-say.ts` on oms-mac-mini.
+   excluded. Otherwise `routine-say.ts` posts it from this Mac with om-agent's
+   app key in `~/.config/kudos/om-agent.env` (mint one with `om app rotate om-agent`).
 
 ## Why the writer is locked down
 
