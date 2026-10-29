@@ -191,7 +191,7 @@ bot (`om-readers`) reads the copies. OM Chat #announcements is not watched for l
 |---|---|
 | Installed routine | `~/.local/share/kudos/` (outside `~/Documents`: launchd can't read it reliably) |
 | Wrapper + schedule | `~/.local/bin/om-kudos`, `~/Library/LaunchAgents/com.nicholas.om-kudos.plist` |
-| State (freeze list, Discord cursor, last success) | `~/.local/state/kudos/state.json` |
+| State (freeze list: anyone thanked in the last 14 days, by launch or weekly post; Discord cursor; last success) | `~/.local/state/kudos/state.json` |
 | Every run's team ranking and the draft with each number's source | `~/.local/state/kudos/drafts/` |
 | Log | `~/.local/state/kudos/logs/launchd.out` |
 | Discord bot token + channel | `~/.config/kudos/discord.env` (chmod 600) |
