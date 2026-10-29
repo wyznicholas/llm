@@ -23,7 +23,7 @@ import {
 import { discordConfigured, discordPostsAfter } from "./discord";
 import { commitDays, listMergedMrs, notesFromOthers } from "./gitlab";
 import { loadState, postAsAgent, postProblems, STATE_DIR, saveState } from "./post";
-import { type Pick, rankRecipients } from "./score";
+import { lastKudosByPerson, type Pick, rankRecipients } from "./score";
 import { buildStats, daysOpen, HARD_MR_DAYS, isBot, isFix } from "./stats";
 import type { KudosState, PersonStats } from "./types";
 import { type Draft, writeDraft } from "./writer";
@@ -243,11 +243,7 @@ async function weekly(state: KudosState, excluded: Set<string>): Promise<void> {
   }
   const handles = Object.values(people.handles);
   const announcements = chat.filter((e) => ANNOUNCERS.has(e.handle));
-  const lastKudos = new Map(
-    state.kudos
-      .filter((k) => k.kind === "weekly" && !k.dryRun)
-      .map((k) => [k.gitlab, k.at] as const),
-  );
+  const lastKudos = lastKudosByPerson(state.kudos);
   const stats = buildStats({
     mrs,
     names: authors,

@@ -6,7 +6,7 @@
 // cannot drown out everything else, and someone already thanked publicly drops
 // down the list on their own.
 
-import type { PersonStats } from "./types";
+import type { KudosRecord, PersonStats } from "./types";
 
 export const FREEZE_DAYS = 14;
 const DAY_MS = 86_400_000;
@@ -59,6 +59,22 @@ export interface Pick {
   effort: number;
   recognition: number;
   gap: number;
+}
+
+/** When each person was last thanked in a real post, by GitLab username.
+ *
+ *  Launch thank-yous count as well as weekly ones (2026-10-29): the weekly
+ *  pick is for work nobody has noticed, and a public launch credit is being
+ *  noticed. Counting weekly only, the 10-30 pick would have been Bryan, two
+ *  days after the iOS launch post thanked him by name. */
+export function lastKudosByPerson(kudos: KudosRecord[]): Map<string, string> {
+  const last = new Map<string, string>();
+  for (const k of kudos) {
+    if (k.dryRun) continue;
+    const prev = last.get(k.gitlab);
+    if (!prev || Date.parse(k.at) > Date.parse(prev)) last.set(k.gitlab, k.at);
+  }
+  return last;
 }
 
 export function eligible(p: PersonStats, excluded: Set<string>, now: number): boolean {
