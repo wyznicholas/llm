@@ -40,6 +40,10 @@ it gives one or two real numbers about who it helped.
    overlooked. The post praises the work, nothing else.
 3. Tag people only by the handles in the evidence (`handles` map / `person.handle`).
    Never tag anyone listed in `excluded`, and never use @everyone/@here.
+   Call people only by the name in the `names` map (keyed by GitLab username;
+   `person.name` in weekly mode). Someone with no name there is called by their
+   @handle. Never take a name from a GitLab profile, an MR or a commit: those
+   are often family name first, and "Ji Chang" goes by CJ, not Ji.
 4. Do not mention this bot, its scoring, or how the person was chosen.
 5. Keep it under 1,200 characters. Plain and warm, not hype: no "rockstar",
    no "crushing it", at most one emoji. Plain language throughout (see below).

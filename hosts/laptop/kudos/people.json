@@ -22,6 +22,27 @@
     "bobbytfc": "bobbytfc",
     "twikuan_tc": "weiit"
   },
+  "_names_comment": "GitLab username -> what teammates call them, for the post's prose. GitLab profile names are often family-name-first ('Ji Chang' is CJ), so the writer never takes a name from GitLab; anyone missing here is called by @handle.",
+  "names": {
+    "nicholaswong2": "Nicholas",
+    "cj4269": "CJ",
+    "bryanchowwq": "Bryan",
+    "skyler18": "Skyler",
+    "jianhui3": "Kyler",
+    "eamon5": "Eamon",
+    "jensenkau": "Jensen",
+    "harry208": "Harry",
+    "ryan_ng": "Ryan",
+    "gerald57": "Gerald",
+    "jiin3": "Jiin",
+    "daryl37": "Daryl",
+    "pan26": "Panos",
+    "justin464": "Justin",
+    "khaiwei": "Khai Wei",
+    "bobbytfc": "Bobby"
+  },
   "_exclude_comment": "Never picked, whatever their score. Kyle by request (2026-10-12).",
-  "exclude": ["kyletf"]
+  "exclude": [
+    "kyletf"
+  ]
 }
