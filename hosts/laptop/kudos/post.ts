@@ -74,6 +74,23 @@ const SECRET_RE = new RegExp(
   ].join("|"),
 );
 
+/** Bold every known @handle that runs straight into `.` or `-`.
+ *
+ *  OM Chat reads both characters as part of a handle (chat-ui Markdown.tsx
+ *  mention tokenizer: `[a-z0-9_.-]`), so "built by @cj_tharamine." looks for a
+ *  user called "cj_tharamine.", finds none, and renders plain text with no ping.
+ *  That is how the 11-03 Rithmic post failed to tag CJ. Inside `**…**` the
+ *  handle ends at the `*`. Longest handles go first so a handle that is a
+ *  prefix of another is not wrapped inside it. */
+export function sealMentions(text: string, handles: string[]): string {
+  const reEscape = (h: string) => h.replace(/[.*+?^${}()|[\]-]/g, "\\$&");
+  let out = text;
+  for (const h of [...handles].sort((a, b) => b.length - a.length)) {
+    out = out.replace(new RegExp(`(?<![a-z0-9_@*.-])@${reEscape(h)}(?=[.-])`, "gi"), `**@${h}**`);
+  }
+  return out;
+}
+
 export async function postAsAgent(
   room: string,
   text: string,

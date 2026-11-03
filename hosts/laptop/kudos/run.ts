@@ -22,7 +22,7 @@ import {
 } from "./chat";
 import { discordConfigured, discordPostsAfter } from "./discord";
 import { commitDays, listMergedMrs, notesFromOthers } from "./gitlab";
-import { loadState, postAsAgent, postProblems, STATE_DIR, saveState } from "./post";
+import { loadState, postAsAgent, postProblems, STATE_DIR, saveState, sealMentions } from "./post";
 import { lastKudosByPerson, type Pick, rankRecipients } from "./score";
 import { buildStats, daysOpen, HARD_MR_DAYS, isBot, isFix } from "./stats";
 import type { KudosState, PersonStats } from "./types";
@@ -100,7 +100,8 @@ async function deliver(
 ): Promise<number | null> {
   mkdirSync(draftsDir, { recursive: true });
   const credits = state.builderCredits ?? 0;
-  const post = withBuilderCredit(draft.post, credits);
+  const sealed = sealMentions(draft.post, Object.values(people.handles));
+  const post = withBuilderCredit(sealed, credits);
   const problems = [...postProblems(post, mustTag), ...tagProblems(draft, excluded)];
   const file = join(draftsDir, `${today}-${kind}-${label}${DRY ? ".dry" : ""}.md`);
   const facts = draft.facts.map((f) => `- ${f.claim}\n  source: ${f.source}`).join("\n");
@@ -119,7 +120,7 @@ async function deliver(
     return null;
   }
   const seq = await postAsAgent(KUDOS_ROOM, post);
-  if (post !== draft.post) state.builderCredits = credits + 1;
+  if (post !== sealed) state.builderCredits = credits + 1;
   log(`posted ${kind} kudos for ${label} seq=${seq ?? "?"}`);
   return seq;
 }
