@@ -43,6 +43,7 @@ const args = new Set(process.argv.slice(2));
 const DRY = args.has("--dry-run");
 const people = JSON.parse(readFileSync(join(dirname(import.meta.path), "people.json"), "utf8")) as {
   handles: Record<string, string>;
+  names: Record<string, string>;
   exclude: string[];
 };
 const today = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10);
@@ -148,6 +149,7 @@ async function thankLaunch(
     announcement,
     alreadyThanked,
     handles: people.handles,
+    names: people.names,
     excluded: [...excluded],
   });
   if (draft.skip) {
@@ -279,9 +281,12 @@ async function weekly(state: KudosState, excluded: Set<string>): Promise<void> {
     }));
   log(`weekly: picked @${person.handle} (gap ${pick.gap.toFixed(2)})`);
   const draft = await draftWithStats("weekly", {
-    person: { ...person, mrs: mrsForWriter },
+    // The GitLab profile name stays out: it is how the 11-03 post came to
+    // call CJ "Ji". The writer gets the name people use, or none.
+    person: { ...person, name: people.names[person.gitlab] ?? null, mrs: mrsForWriter },
     windowDays: WINDOW_DAYS,
     handles: people.handles,
+    names: people.names,
     excluded: [...excluded],
   });
   if (draft.skip) {
