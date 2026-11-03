@@ -42,7 +42,5 @@
     "bobbytfc": "Bobby"
   },
   "_exclude_comment": "Never picked, whatever their score. Kyle by request (2026-10-12).",
-  "exclude": [
-    "kyletf"
-  ]
+  "exclude": ["kyletf"]
 }
