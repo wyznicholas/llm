@@ -45,6 +45,9 @@ export function postProblems(text: string, mustTag: string[]): string[] {
     problems.push(`longer than ${MAX_POST_BYTES} bytes`);
   // A kudos post pings the people it thanks, never the whole channel.
   if (/@(everyone|here|channel)\b/i.test(text)) problems.push("contains a mass mention");
+  // Posts are plain language. Code formatting also hides a tag from the chat
+  // reader (a link inside code never mentions anyone), so it is refused.
+  if (/`|^(?: {4}|\t)\S/m.test(text)) problems.push("contains code formatting");
   for (const h of mustTag) if (!text.includes(`@${h}`)) problems.push(`does not tag @${h}`);
   // The writer reads text anyone can put in an MR; a link it was talked into
   // adding would go out under @om-agent's name. Only our own hosts pass.
@@ -74,19 +77,39 @@ const SECRET_RE = new RegExp(
   ].join("|"),
 );
 
-/** Bold every known @handle that runs straight into `.` or `-`.
+/** Write each tag as the `om://user/<userId>` link the app sends.
  *
- *  OM Chat reads both characters as part of a handle (chat-ui Markdown.tsx
- *  mention tokenizer: `[a-z0-9_.-]`), so "built by @cj_tharamine." looks for a
- *  user called "cj_tharamine.", finds none, and renders plain text with no ping.
- *  That is how the 11-03 Rithmic post failed to tag CJ. Inside `**…**` the
- *  handle ends at the `*`. Longest handles go first so a handle that is a
- *  prefix of another is not wrapped inside it. */
-export function sealMentions(text: string, handles: string[]): string {
-  const reEscape = (h: string) => h.replace(/[.*+?^${}()|[\]-]/g, "\\$&");
+ *  Since 2026-11-23 OM Chat turns a typed `@handle` into that link when a
+ *  person sends (rooms-client shared/handle-mentions), and the link is what
+ *  draws as a mention and notifies. The bot posts through sayRoom with no app
+ *  in between, so it converts here. A link also ends at its 24-hex id, so a
+ *  full stop after it is just punctuation (the 11-03 "@cj_tharamine." trap).
+ *  Longest handles first; a handle that is part of a longer one is left. */
+export function linkMentions(
+  text: string,
+  userIds: Map<string, string>,
+  approved: Iterable<string>,
+): string {
+  // Only the post's approved tags become links: a `@name` the writer was
+  // talked into (an excluded person, say) stays plain text and pings nobody.
+  const allow = new Set([...approved].map((h) => h.toLowerCase()));
+  const reEscape = (h: string) => h.replace(/[\\^$.*+?()[\]{}|-]/g, "\\$&");
   let out = text;
-  for (const h of [...handles].sort((a, b) => b.length - a.length)) {
-    out = out.replace(new RegExp(`(?<![a-z0-9_@*.-])@${reEscape(h)}(?=[.-])`, "gi"), `**@${h}**`);
+  for (const h of [...allow].sort((x, y) => y.length - x.length)) {
+    const id = userIds.get(h);
+    if (!id || !/^[0-9a-f]{24}$/.test(id) || !/^[a-z0-9_.-]{1,64}$/.test(h)) continue;
+    const re = new RegExp(`(?<![a-z0-9_@./-])@${reEscape(h)}(?![a-z0-9_]|[.-][a-z0-9_])`, "gi");
+    // A tag inside a web address or a Markdown link's destination is not a
+    // mention to the reader, and converting it would break the address.
+    const protectedRanges = [...out.matchAll(/https?:\/\/\S*|\]\([^)]*\)/g)].map((m) => [
+      m.index,
+      m.index + m[0].length,
+    ]);
+    out = out.replace(re, (match, offset: number) =>
+      protectedRanges.some(([a, b]) => offset >= (a ?? 0) && offset < (b ?? 0))
+        ? match
+        : `om://user/${id}`,
+    );
   }
   return out;
 }

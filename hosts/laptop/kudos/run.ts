@@ -16,13 +16,14 @@ import {
   type ChatEntry,
   countMentions,
   KUDOS_ROOM,
+  memberUserIds,
   qaHandles,
   roomHistory,
   spaceRooms,
 } from "./chat";
 import { discordConfigured, discordPostsAfter } from "./discord";
 import { commitDays, listMergedMrs, notesFromOthers } from "./gitlab";
-import { loadState, postAsAgent, postProblems, STATE_DIR, saveState, sealMentions } from "./post";
+import { linkMentions, loadState, postAsAgent, postProblems, STATE_DIR, saveState } from "./post";
 import { lastKudosByPerson, type Pick, rankRecipients } from "./score";
 import { buildStats, daysOpen, HARD_MR_DAYS, isBot, isFix } from "./stats";
 import type { KudosState, PersonStats } from "./types";
@@ -71,7 +72,7 @@ const BUILDER_CREDIT_POSTS = 2;
 
 export function withBuilderCredit(post: string, creditsGiven: number): string {
   if (creditsGiven >= BUILDER_CREDIT_POSTS) return post;
-  return `${post}\n\n_Kudos bot built by @${BUILDER_HANDLE}_`;
+  return `${post}\n\n_Kudos bot built by_ @${BUILDER_HANDLE}`;
 }
 
 /** Draft, and give a draft with no numbers one more, pointed attempt.
@@ -100,9 +101,23 @@ async function deliver(
 ): Promise<number | null> {
   mkdirSync(draftsDir, { recursive: true });
   const credits = state.builderCredits ?? 0;
-  const sealed = sealMentions(draft.post, Object.values(people.handles));
-  const post = withBuilderCredit(sealed, credits);
-  const problems = [...postProblems(post, mustTag), ...tagProblems(draft, excluded)];
+  const post = withBuilderCredit(draft.post, credits);
+  const userIds = await memberUserIds();
+  // tagProblems checks draft.tags are known and not excluded; the builder
+  // credit tags its fixed handle. Only these become links.
+  const approved = [...mustTag, ...draft.tags, ...(post !== draft.post ? [BUILDER_HANDLE] : [])];
+  const linked = linkMentions(post, userIds, approved);
+  const problems = [
+    ...postProblems(post, mustTag),
+    ...tagProblems(draft, excluded),
+    // Judged on what goes out: "@x" in italics passes the text check above
+    // but never becomes a link (code is refused by postProblems).
+    ...mustTag
+      .filter((h) => !linked.includes(`om://user/${userIds.get(h.toLowerCase()) ?? "?"}`))
+      .map(
+        (h) => `@${h} would not be tagged (not a space member, or written where it cannot link)`,
+      ),
+  ];
   const file = join(draftsDir, `${today}-${kind}-${label}${DRY ? ".dry" : ""}.md`);
   const facts = draft.facts.map((f) => `- ${f.claim}\n  source: ${f.source}`).join("\n");
   const noStats =
@@ -119,8 +134,8 @@ async function deliver(
     log(`dry run: ${kind} draft written to ${file}`);
     return null;
   }
-  const seq = await postAsAgent(KUDOS_ROOM, post);
-  if (post !== sealed) state.builderCredits = credits + 1;
+  const seq = await postAsAgent(KUDOS_ROOM, linked);
+  if (post !== draft.post) state.builderCredits = credits + 1;
   log(`posted ${kind} kudos for ${label} seq=${seq ?? "?"}`);
   return seq;
 }
@@ -245,6 +260,7 @@ async function weekly(state: KudosState, excluded: Set<string>): Promise<void> {
     await Bun.sleep(1000); // reads spend the operator's own rate budget
   }
   const handles = Object.values(people.handles);
+  const userIds = await memberUserIds();
   const announcements = chat.filter((e) => ANNOUNCERS.has(e.handle));
   const lastKudos = lastKudosByPerson(state.kudos);
   const stats = buildStats({
@@ -253,15 +269,19 @@ async function weekly(state: KudosState, excluded: Set<string>): Promise<void> {
     handles: people.handles,
     notesFromOthers: notes,
     commitDays: worked,
-    chatMentions: countMentions(chat, handles),
-    picMentions: countMentions(announcements, handles),
+    chatMentions: countMentions(chat, handles, userIds),
+    picMentions: countMentions(announcements, handles, userIds),
     lastKudos,
   });
 
   const picks = rankRecipients(stats, excluded, now);
   mkdirSync(draftsDir, { recursive: true });
   writeFileSync(join(draftsDir, `${today}-ranking.md`), `${rankingTable(picks)}\n`);
-  const pick = picks[0];
+  // Only someone in the space can be tagged; deliver would refuse anyone else
+  // on every slot, and the week would go without a post.
+  const pick = picks.find((p) => userIds.has((p.person.handle ?? "").toLowerCase()));
+  if (pick && pick !== picks[0])
+    log(`weekly: skipped @${picks[0]?.person.handle}, not a space member`);
   if (!pick) {
     log("weekly: nobody eligible this run");
     return;

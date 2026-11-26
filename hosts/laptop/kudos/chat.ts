@@ -93,16 +93,39 @@ export async function qaHandles(): Promise<Set<string>> {
   );
 }
 
-/** How often each handle was @mentioned by another human in these entries. */
+/** Each space member's user id, keyed by lower-cased handle. Since 2026-11-23
+ *  the app writes a typed `@handle` as `om://user/<userId>` when it sends, so
+ *  tags and mention counts both need the id. */
+export async function memberUserIds(): Promise<Map<string, string>> {
+  const { members } = await social<{ members: Array<{ handle?: string; userId?: string }> }>(
+    `/spaces/${SPACE}/members`,
+  );
+  const ids = new Map<string, string>();
+  for (const m of members) if (m.handle && m.userId) ids.set(m.handle.toLowerCase(), m.userId);
+  return ids;
+}
+
+/** How often each handle was mentioned by another human in these entries,
+ *  as a typed `@handle` or as the `om://user/<id>` link the app now sends. */
 export function countMentions(
   entries: ChatEntry[],
   handles: Iterable<string>,
+  userIds: Map<string, string> = new Map(),
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const h of handles) {
-    const re = new RegExp(`@${h.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    const typed = `@${h.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`;
+    const id = userIds.get(h.toLowerCase());
+    const typedRe = new RegExp(typed, "i");
+    // The shared reader's boundaries (rooms-client shared/mention-links): lower
+    // case, not after a handle character, and the id must not run on.
+    const linkRe =
+      id && /^[0-9a-f]{24}$/.test(id)
+        ? new RegExp(`(?<![A-Za-z0-9_@-])om://user/${id}(?![A-Za-z0-9]|[-_]+[A-Za-z0-9])`)
+        : null;
     let n = 0;
-    for (const e of entries) if (!e.isAgent && e.handle !== h && re.test(e.text)) n++;
+    for (const e of entries)
+      if (!e.isAgent && e.handle !== h && (typedRe.test(e.text) || linkRe?.test(e.text))) n++;
     if (n > 0) counts.set(h, n);
   }
   return counts;
