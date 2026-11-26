@@ -49,17 +49,26 @@ window has been in the background for 10 minutes, it quits to install and reopen
 Work that always fails, because the main copy has the same app open and the installer will not
 replace it. So Claude Work quit and never came back ("I hide it and it's gone").
 
+The same trap works the other way round. On 2026-10-28 the main copy quit at 06:17 to install
+4.29.0 while Claude Work was open, and stayed closed. Clicking the Dock icon did not help: macOS
+saw `Claude.app` already running (as Claude Work) and only brought that window forward. A second
+copy starts only with `open -n`. So the watchdog now covers both copies.
+
 [`watchdog.sh`](watchdog.sh) + [`com.nicholas.claude-work-watchdog.plist`](com.nicholas.claude-work-watchdog.plist)
 fix that without polling:
 
 1. Right before any update quit, the app writes `<data folder>/update-attempt`
    (`{"fromVersion","toVersion","ts"}`) and deletes it on its next start. A plain Cmd+Q
    writes nothing.
-2. launchd watches that one file (`WatchPaths`) and runs the script when it changes.
-3. The script ignores a missing or older-than-10-minutes marker, waits for Claude Work to finish
-   quitting, gives the app 15 s to reopen itself, and otherwise reopens it with the flag.
+2. launchd watches that file in both data folders (`WatchPaths`) and runs the script when
+   either changes. Each run checks both markers, since launchd won't start a second run while
+   one is still waiting.
+3. For each copy, the script ignores a missing or older-than-10-minutes marker, waits for that
+   copy to finish quitting, gives the app 15 s to reopen itself, and otherwise reopens it with
+   `open -n` (plus the flag for Claude Work).
 
-So an update quit reopens it about 20 s later, and quitting it yourself leaves it closed.
+So an update quit reopens either copy about 20 s later, and quitting one yourself leaves it closed.
+The job keeps its old `claude-work-watchdog` name so existing installs and notes still match.
 Log: `~/Library/Logs/claude-work-watchdog.log`.
 
 ```bash
@@ -74,9 +83,10 @@ launchctl bootout gui/$(id -u)/com.nicholas.claude-work-watchdog
 The script lives under `~/Library/Application Support`, not `~/Documents`: launchd jobs cannot
 read `~/Documents` (macOS privacy rules).
 
-Also seen: once Claude's installer has failed for a version, the next start of Claude Work can
-quit again within a minute for the same update. The watchdog brings it back each time; it settles
-once the main Claude restarts and both copies are on the new version.
+Also seen: once Claude's installer has failed for a version, the next start of either copy can
+quit again soon after for the same update (the main copy did, 13 minutes after a manual reopen).
+The watchdog brings it back each time. It settles only when both copies are closed at once, so
+the installer can replace the app: Cmd+Q both, wait a few seconds, then reopen both.
 
 ## Where the app keeps things (per data folder)
 
